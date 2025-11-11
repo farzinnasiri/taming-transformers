@@ -1,0 +1,8 @@
+numpy
+ipython
+jupyterlab
+jupyter
+xeus-python
+notebook
+opencv-python>=4.8.1.78
+
