@@ -13,9 +13,9 @@ SHELL ["/bin/bash", "-c"]
 
 ENV DEBIAN_FRONTEND noninteractive
 RUN apt-get update && apt-get install -y \
-	build-essential ca-certificates python3.9 python3.9-dev python3.9-distutils git vim wget cmake python3-pip
-RUN ln -sv /usr/bin/python3.9 /usr/bin/python
-RUN ln -svf /usr/bin/python3.9 /usr/bin/python3
+    build-essential ca-certificates python3.8 python3.8-dev python3.8-distutils git vim wget cmake python3-pip
+RUN ln -sv /usr/bin/python3.8 /usr/bin/python
+RUN ln -svf /usr/bin/python3.8 /usr/bin/python3
 
 # Add user with its groups
 USER 0
@@ -77,6 +77,9 @@ USER $USERNAME
 #ADD requirements.txt /requirements.txt
 ADD $PIP_REQ_FILE /requirements.txt
 RUN pip install -r /requirements.txt
+
+# Install PyTorch compatible with CUDA 11.7
+RUN pip install torch==1.13.1+cu117 torchvision==0.14.1+cu117 --extra-index-url https://download.pytorch.org/whl/cu117
 
 CMD ["bash"]
 WORKDIR /home/$USERNAME/exp
