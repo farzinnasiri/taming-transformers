@@ -39,7 +39,7 @@ USER $USERNAME
 WORKDIR /home/$USERNAME
 
 ENV PATH="/home/$USERNAME/.local/bin:${PATH}"
-RUN wget https://bootstrap.pypa.io/get-pip.py && \
+RUN wget https://bootstrap.pypa.io/pip/3.8/get-pip.py && \
 	python get-pip.py && \
 	rm get-pip.py
 
@@ -83,3 +83,10 @@ RUN pip install torch==1.13.1+cu117 torchvision==0.14.1+cu117 --extra-index-url 
 
 CMD ["bash"]
 WORKDIR /home/$USERNAME/exp
+
+# Run the container via:
+# docker run --rm -it --gpus all \
+#   -v $(pwd)/taming-transformers:/app \
+#   -v $(pwd)/checkpoints:/checkpoints \
+#   -w /app \
+#   taming:latest python run.py
