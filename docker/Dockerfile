@@ -1,5 +1,5 @@
-# FROM nvidia/cuda:11.6.2-cudnn8-devel-ubuntu18.04
-FROM nvidia/cuda:11.7.1-cudnn8-devel-ubuntu20.04
+# FROM nvidia/cuda:11.7.1-cudnn8-devel-ubuntu20.04
+FROM nvidia/cuda:12.2.2-cudnn8-devel-ubuntu20.04
 
 ARG USERNAME
 ARG USER_UID
@@ -79,12 +79,16 @@ ADD $PIP_REQ_FILE /requirements.txt
 RUN pip install -r /requirements.txt
 
 # Install PyTorch compatible with CUDA 11.7
-RUN pip install torch==1.13.1+cu117 torchvision==0.14.1+cu117 --extra-index-url https://download.pytorch.org/whl/cu117
+# RUN pip install torch==2.5.1+cu117 torchvision==0.14.1+cu117 --extra-index-url https://download.pytorch.org/whl/cu117
+RUN pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu121
 
 CMD ["bash"]
 WORKDIR /home/$USERNAME/exp
 
-# Run the container via:
+# Build via:
+# ./build.sh -- -t taming:latest .
+
+# After builind, run the container via:
 # docker run --rm -it --gpus all \
 #   -v $(pwd)/taming-transformers:/app \
 #   -v $(pwd)/checkpoints:/checkpoints \
