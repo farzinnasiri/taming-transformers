@@ -1,5 +1,5 @@
-# FROM nvidia/cuda:11.7.1-cudnn8-devel-ubuntu20.04
-FROM nvidia/cuda:12.2.2-cudnn8-devel-ubuntu20.04
+FROM nvidia/cuda:11.7.1-cudnn8-devel-ubuntu20.04
+# FROM nvidia/cuda:12.2.2-cudnn8-devel-ubuntu20.04
 
 ARG USERNAME
 ARG USER_UID
