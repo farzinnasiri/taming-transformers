@@ -79,7 +79,7 @@ ADD $PIP_REQ_FILE /requirements.txt
 RUN pip install -r /requirements.txt
 
 # Install PyTorch compatible with CUDA 11.7
-RUN pip install torch==2.5.1+cu117 torchvision==0.14.1+cu117 --extra-index-url https://download.pytorch.org/whl/cu117
+RUN pip install torch==1.13.1+cu117 torchvision==0.14.1+cu117 --extra-index-url https://download.pytorch.org/whl/cu117
 # RUN pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu121
 
 CMD ["bash"]
