@@ -6,11 +6,9 @@ import numpy as np
 from PIL import Image
 from omegaconf import OmegaConf
 from torchvision.utils import save_image
-from taming.modules.losses.lpips import LPIPS
 import sys
-
 sys.path.append('.')
-
+from taming.modules.losses.lpips import LPIPS
 from taming.models.vqgan import VQModel
 
 CONFIG_PATH = "/checkpoints/vqgan_imagenet_f16_16384/model.yaml"
