@@ -15,10 +15,12 @@ from taming.models.vqgan import VQModel
 CONFIG_PATH = "/checkpoints/vqgan_imagenet_f16_16384/model.yaml"
 MODEL_PATH = "/checkpoints/vqgan_imagenet_f16_16384/last.ckpt"
 IMAGENET_ROOT = "/datasets/imagenet/val/n02480495"
-OUTDIR = "recon_imagenet_val"
+OUTDIR = "recon_imagenet_single"
 SIZE = 256
-LIMIT = 96
-BATCH_SIZE = 12
+LIMIT = 16
+CODEBOOK_PRINT_LIMIT = 16
+CODEBOOK_SAVE_PATH = os.path.join(OUTDIR, "codebook.pt")
+CODEBOOK_NPY_SAVE_PATH = os.path.join(OUTDIR, "codebook.npy")
 
 def load_model(config_path, ckpt_path, device):
     config = OmegaConf.load(config_path)
@@ -51,30 +53,51 @@ def to_01(x):
     x = x.clamp(-1,1)
     return (x + 1) / 2
 
+def print_codebook(model, limit=None):
+    q = model.quantize
+    emb = getattr(q, "embedding", None)
+    if emb is None:
+        emb = getattr(q, "embed", None)
+    w = emb.weight.detach().cpu()
+    print("codebook shape:", tuple(w.shape))
+    if limit is None:
+        print(w)
+    else:
+        print(w[:limit])
+
+def save_codebook_npy(model, path):
+    q = model.quantize
+    emb = getattr(q, "embedding", None)
+    if emb is None:
+        emb = getattr(q, "embed", None)
+    w = emb.weight.detach().cpu().numpy()
+    np.save(path, w)
+
 def main():
     os.makedirs(OUTDIR, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = load_model(CONFIG_PATH, MODEL_PATH, device)
+    print_codebook(model, CODEBOOK_PRINT_LIMIT)
+    save_codebook_npy(model, CODEBOOK_NPY_SAVE_PATH)
 
-    exts = ("*.JPEG","*.JPG","*.jpg","*.png")
-    files = []
+    exts = ("*.JPEG","*.JPG","*.jpg")
+    pictures = []
     for e in exts:
-        files.extend(glob.glob(os.path.join(IMAGENET_ROOT, "**", e), recursive=True))
-    random.shuffle(files)
-    if LIMIT > 0:
-        files = files[:LIMIT]
+        pictures.extend(glob.glob(os.path.join(IMAGENET_ROOT, e)))
+    random.shuffle(pictures)
 
-    for i in range(0, len(files), BATCH_SIZE):
-        batch_paths = files[i:i+BATCH_SIZE]
-        xs = [preprocess(p, SIZE) for p in batch_paths]
-        x = torch.stack(xs, 0).to(device)
+    pictures = pictures[:LIMIT]
+
+    for picture in pictures:
+        x = preprocess(picture, SIZE).unsqueeze(0).to(device)
         with torch.no_grad():
             quant, _, _ = model.encode(x)
             recon = model.decode(quant)
-        orig = to_01(x)
-        rec = to_01(recon)
-        save_image(orig, os.path.join(OUTDIR, f"orig_{i:06}.png"), nrow=len(batch_paths))
-        save_image(rec, os.path.join(OUTDIR, f"recon_{i:06}.png"), nrow=len(batch_paths))
+        orig = to_01(x)[0]
+        rec = to_01(recon)[0]
+        base = os.path.splitext(os.path.basename(picture))[0]
+        save_image(orig, os.path.join(OUTDIR, f"orig_{base}.png"))
+        save_image(rec, os.path.join(OUTDIR, f"recon_{base}.png"))
 
 if __name__ == "__main__":
     main()

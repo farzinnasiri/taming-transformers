@@ -79,3 +79,6 @@ with torch.no_grad(): # We don't need to track gradients
     save_image(processed_image, "my_manual_creation.png")
     
     print("Done! Check 'my_manual_creation.png' in your ~/vq-gan/taming-transformers folder.")
+
+
+ # todo -> tokenize and detoknize acutal images from imagenet (loss vs metric)   
