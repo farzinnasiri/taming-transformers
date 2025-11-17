@@ -6,6 +6,7 @@ import numpy as np
 from PIL import Image
 from omegaconf import OmegaConf
 from torchvision.utils import save_image
+from taming.modules.losses.lpips import LPIPS
 import sys
 
 sys.path.append('.')
@@ -80,6 +81,13 @@ def main():
     print_codebook(model, CODEBOOK_PRINT_LIMIT)
     save_codebook_npy(model, CODEBOOK_NPY_SAVE_PATH)
 
+    lpips = LPIPS().to(device).eval()
+    n_codes = getattr(model.quantize, "n_e", getattr(model.quantize, "n_embed", None))
+    counts = torch.zeros(n_codes, dtype=torch.long)
+    total_mse = 0.0
+    total_lpips = 0.0
+    n_images = 0
+
     exts = ("*.JPEG","*.JPG","*.jpg")
     pictures = []
     for e in exts:
@@ -91,13 +99,38 @@ def main():
     for picture in pictures:
         x = preprocess(picture, SIZE).unsqueeze(0).to(device)
         with torch.no_grad():
-            quant, _, _ = model.encode(x)
+            quant, _, info = model.encode(x)
             recon = model.decode(quant)
         orig = to_01(x)[0]
         rec = to_01(recon)[0]
+        # metrics 
+        mse = torch.mean((orig - rec) ** 2).item()
+        lp = lpips(x, recon).mean().item()
+        inds = info[2]
+        inds = torch.flatten(inds).cpu().long()
+        counts += torch.bincount(inds, minlength=n_codes)
+        total_mse += mse
+        total_lpips += lp
+        n_images += 1
+        
         base = os.path.splitext(os.path.basename(picture))[0]
         save_image(orig, os.path.join(OUTDIR, f"orig_{base}.png"))
         save_image(rec, os.path.join(OUTDIR, f"recon_{base}.png"))
+        print(f"{base} mse={mse:.6f} lpips={lp:.6f}")
+
+    if n_images > 0:
+        avg_mse = total_mse / n_images
+        avg_lpips = total_lpips / n_images
+        total_tokens = int(counts.sum().item())
+        used = int((counts > 0).sum().item())
+        dead = int(n_codes - used)
+        if total_tokens > 0:
+            p = counts.float() / total_tokens
+            perplexity = float(torch.exp(-(p * torch.log(p + 1e-10)).sum()).item())
+        else:
+            perplexity = 0.0
+        print(f"summary n={n_images} mse={avg_mse:.6f} lpips={avg_lpips:.6f}")
+        print(f"codes used={used}/{n_codes} dead={dead} tokens={total_tokens} perplexity={perplexity:.2f}")
 
 if __name__ == "__main__":
     main()
