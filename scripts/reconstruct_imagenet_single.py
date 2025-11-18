@@ -16,12 +16,38 @@ from taming.models.vqgan import VQModel
 CONFIG_PATH = "/checkpoints/vqgan_imagenet_f16_16384/model.yaml"
 MODEL_PATH = "/checkpoints/vqgan_imagenet_f16_16384/last.ckpt"
 IMAGENET_ROOTS = [
-    "/datasets/imagenet/val/n02480495"
+    "/datasets/imagenet/val/n01440764",
+    "/datasets/imagenet/val/n02074367",
+    "/datasets/imagenet/val/n02124075",
+    "/datasets/imagenet/val/n02123394",
+    "/datasets/imagenet/val/n02123045",
+    "/datasets/imagenet/val/n02123159",
+    "/datasets/imagenet/val/n02123597",
+    "/datasets/imagenet/val/n02129165",
+    "/datasets/imagenet/val/n02129604",
+    "/datasets/imagenet/val/n02130308",
+    "/datasets/imagenet/val/n02480495",
+    "/datasets/imagenet/val/n02481823",
+    "/datasets/imagenet/val/n02480855",
+    "/datasets/imagenet/val/n02489166",
+    "/datasets/imagenet/val/n02486410",
+    "/datasets/imagenet/val/n02109961",
+    "/datasets/imagenet/val/n02099601",
+    "/datasets/imagenet/val/n02106166",
+    "/datasets/imagenet/val/n02108089",
+    "/datasets/imagenet/val/n02107142",
+    "/datasets/imagenet/val/n02120079",
+    "/datasets/imagenet/val/n02119022",
+    "/datasets/imagenet/val/n02326432",
+    "/datasets/imagenet/val/n02690373",
+    "/datasets/imagenet/val/n03642806",
+    "/datasets/imagenet/val/n04254680",
+    "/datasets/imagenet/val/n04507155"
 ]
 STAMP = int(time.time())
 OUTDIR = f"{STAMP}_recon_imagenet_single"
-SIZE = 256
-LIMIT = 16
+SIZE = 256 # size to resize smallest side to, then center crop
+LIMIT = 500 # limit for number of images to process
 CODEBOOK_PRINT_LIMIT = 16
 CODEBOOK_NPY_SAVE_PATH = os.path.join(OUTDIR, "codebook.npy")
 
