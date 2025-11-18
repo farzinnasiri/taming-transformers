@@ -3,6 +3,7 @@ import glob
 import random
 import time
 import json
+import math
 import torch
 import numpy as np
 from PIL import Image
@@ -16,33 +17,33 @@ from taming.models.vqgan import VQModel
 CONFIG_PATH = "/checkpoints/vqgan_imagenet_f16_16384/model.yaml"
 MODEL_PATH = "/checkpoints/vqgan_imagenet_f16_16384/last.ckpt"
 IMAGENET_ROOTS = [
-    "/datasets/imagenet/val/n01440764",
-    "/datasets/imagenet/val/n02074367",
-    "/datasets/imagenet/val/n02124075",
-    "/datasets/imagenet/val/n02123394",
-    "/datasets/imagenet/val/n02123045",
-    "/datasets/imagenet/val/n02123159",
-    "/datasets/imagenet/val/n02123597",
-    "/datasets/imagenet/val/n02129165",
-    "/datasets/imagenet/val/n02129604",
-    "/datasets/imagenet/val/n02130308",
-    "/datasets/imagenet/val/n02480495",
-    "/datasets/imagenet/val/n02481823",
-    "/datasets/imagenet/val/n02480855",
-    "/datasets/imagenet/val/n02489166",
-    "/datasets/imagenet/val/n02486410",
-    "/datasets/imagenet/val/n02109961",
-    "/datasets/imagenet/val/n02099601",
-    "/datasets/imagenet/val/n02106166",
-    "/datasets/imagenet/val/n02108089",
-    "/datasets/imagenet/val/n02107142",
-    "/datasets/imagenet/val/n02120079",
-    "/datasets/imagenet/val/n02119022",
-    "/datasets/imagenet/val/n02326432",
-    "/datasets/imagenet/val/n02690373",
-    "/datasets/imagenet/val/n03642806",
-    "/datasets/imagenet/val/n04254680",
-    "/datasets/imagenet/val/n04507155"
+    "/datasets/imagenet/val/n01440764",  # tench (fish)
+    "/datasets/imagenet/val/n02074367",  # dugong
+    "/datasets/imagenet/val/n02124075",  # Egyptian cat
+    "/datasets/imagenet/val/n02123394",  # Persian cat
+    "/datasets/imagenet/val/n02123045",  # tabby cat
+    "/datasets/imagenet/val/n02123159",  # tiger cat
+    "/datasets/imagenet/val/n02123597",  # Siamese cat
+    "/datasets/imagenet/val/n02129165",  # lion
+    "/datasets/imagenet/val/n02129604",  # tiger
+    "/datasets/imagenet/val/n02130308",  # cheetah
+    "/datasets/imagenet/val/n02480495",  # orangutan
+    "/datasets/imagenet/val/n02481823",  # chimpanzee
+    "/datasets/imagenet/val/n02480855",  # gorilla
+    "/datasets/imagenet/val/n02489166",  # proboscis monkey
+    "/datasets/imagenet/val/n02486410",  # baboon
+    "/datasets/imagenet/val/n02109961",  # husky
+    "/datasets/imagenet/val/n02099601",  # golden retriever
+    "/datasets/imagenet/val/n02106166",  # Border collie
+    "/datasets/imagenet/val/n02108089",  # boxer
+    "/datasets/imagenet/val/n02107142",  # Doberman pinscher
+    "/datasets/imagenet/val/n02120079",  # Arctic fox
+    "/datasets/imagenet/val/n02119022",  # red fox
+    "/datasets/imagenet/val/n02326432",  # hare
+    "/datasets/imagenet/val/n02690373",  # airliner
+    "/datasets/imagenet/val/n03642806",  # laptop
+    "/datasets/imagenet/val/n04254680",  # soccer ball
+    "/datasets/imagenet/val/n04507155"   # umbrella
 ]
 STAMP = int(time.time())
 OUTDIR = f"{STAMP}_recon_imagenet_single"
@@ -91,6 +92,27 @@ def compute_mse(orig01, rec01):
 # Lower is more similar
 def compute_lpips(lpips_model, x_m11, recon_m11):
     return lpips_model(x_m11, recon_m11).mean().item()
+
+# PSNR: peak signal-to-noise ratio in dB on [0,1]; PSNR = 10*log10(1/MSE)
+# Returns inf if MSE == 0
+def compute_psnr(mse):
+    if mse <= 0.0:
+        return float('inf')
+    return 10.0 * math.log10(1.0 / mse)
+
+# SSIM: structural similarity index averaged over channels (global variant)
+# SSIM(x, y) = ((2μxμy + C1)(2σxy + C2)) / ((μx^2 + μy^2 + C1)(σx^2 + σy^2 + C2))
+# Inputs are [0,1] C×H×W tensors
+def compute_ssim(orig01, rec01, c1=0.01**2, c2=0.03**2):
+    x = orig01
+    y = rec01
+    mu_x = x.mean(dim=(1,2), keepdim=True)
+    mu_y = y.mean(dim=(1,2), keepdim=True)
+    var_x = ((x - mu_x) ** 2).mean(dim=(1,2), keepdim=True)
+    var_y = ((y - mu_y) ** 2).mean(dim=(1,2), keepdim=True)
+    cov_xy = ((x - mu_x) * (y - mu_y)).mean(dim=(1,2), keepdim=True)
+    ssim_map = ((2*mu_x*mu_y + c1) * (2*cov_xy + c2)) / ((mu_x**2 + mu_y**2 + c1) * (var_x + var_y + c2))
+    return ssim_map.mean().item()
 
 # Perplexity: exp(-sum p_i log p_i) over usage probs p_i
 def compute_perplexity_from_counts(counts):
@@ -189,6 +211,9 @@ def main():
     counts = torch.zeros(n_codes, dtype=torch.long)
     total_mse = 0.0
     total_lpips = 0.0
+    total_psnr = 0.0
+    psnr_count = 0
+    total_ssim = 0.0
     n_images = 0
     per_image = []
 
@@ -204,34 +229,45 @@ def main():
         # metrics 
         mse = compute_mse(orig, rec)
         lp = compute_lpips(lpips, x, recon)
+        psnr = compute_psnr(mse)
+        ssim = compute_ssim(orig, rec)
         inds = info[2]
         inds = flatten_indices(inds)
         counts += compute_code_usage_counts(inds, n_codes)
         total_mse += mse
         total_lpips += lp
+        if math.isfinite(psnr):
+            total_psnr += psnr
+            psnr_count += 1
+        total_ssim += ssim
         n_images += 1
-        per_image.append({"path": picture, "mse": mse, "lpips": lp})
+        per_image.append({"path": picture, "mse": mse, "lpips": lp, "psnr": (psnr if math.isfinite(psnr) else None), "ssim": ssim})
         
         base = os.path.splitext(os.path.basename(picture))[0]
         save_image(orig, os.path.join(OUTDIR, f"orig_{base}.png"))
         save_image(rec, os.path.join(OUTDIR, f"recon_{base}.png"))
-        print(f"{base} mse={mse:.6f} lpips={lp:.6f}")
+        psnr_str = f"{psnr:.2f}" if math.isfinite(psnr) else "inf"
+        print(f"{base} mse={mse:.6f} lpips={lp:.6f} psnr={psnr_str} ssim={ssim:.4f}")
 
     if n_images > 0:
         avg_mse = total_mse / n_images
         avg_lpips = total_lpips / n_images
+        avg_psnr = (total_psnr / psnr_count) if psnr_count > 0 else float('inf')
+        avg_ssim = total_ssim / n_images
         total_tokens = compute_total_tokens(counts)
         used, dead = compute_used_dead_codes(counts, n_codes)
         perplexity = compute_perplexity_from_counts(counts)
-        print(f"summary n={n_images} mse={avg_mse:.6f} lpips={avg_lpips:.6f}")
+        psnr_str = f"{avg_psnr:.2f}" if math.isfinite(avg_psnr) else "inf"
+        print(f"summary n={n_images} mse={avg_mse:.6f} lpips={avg_lpips:.6f} psnr={psnr_str} ssim={avg_ssim:.4f}")
         print(f"codes used={used}/{n_codes} dead={dead} tokens={total_tokens} perplexity={perplexity:.2f}")
         summary = {
             "timestamp": STAMP,
-            "roots": IMAGENET_ROOTS,
             "limit": LIMIT,
             "num_images": n_images,
             "avg_mse": avg_mse,
             "avg_lpips": avg_lpips,
+            "avg_psnr": (avg_psnr if math.isfinite(avg_psnr) else None),
+            "avg_ssim": avg_ssim,
             "n_codes": int(n_codes),
             "used_codes": used,
             "dead_codes": dead,
