@@ -1,6 +1,8 @@
 import os
 import glob
 import random
+import time
+import json
 import torch
 import numpy as np
 from PIL import Image
@@ -13,12 +15,14 @@ from taming.models.vqgan import VQModel
 
 CONFIG_PATH = "/checkpoints/vqgan_imagenet_f16_16384/model.yaml"
 MODEL_PATH = "/checkpoints/vqgan_imagenet_f16_16384/last.ckpt"
-IMAGENET_ROOT = "/datasets/imagenet/val/n02480495"
-OUTDIR = "recon_imagenet_single"
+IMAGENET_ROOTS = [
+    "/datasets/imagenet/val/n02480495"
+]
+STAMP = int(time.time())
+OUTDIR = f"{STAMP}_recon_imagenet_single"
 SIZE = 256
 LIMIT = 16
 CODEBOOK_PRINT_LIMIT = 16
-CODEBOOK_SAVE_PATH = os.path.join(OUTDIR, "codebook.pt")
 CODEBOOK_NPY_SAVE_PATH = os.path.join(OUTDIR, "codebook.npy")
 
 def load_model(config_path, ckpt_path, device):
@@ -52,10 +56,85 @@ def to_01(x):
     x = x.clamp(-1,1)
     return (x + 1) / 2
 
+# MSE: mean of squared differences in [0,1]
+# MSE(x, y) = mean((x - y)^2)
+def compute_mse(orig01, rec01):
+    return torch.mean((orig01 - rec01) ** 2).item()
+
+# LPIPS: perceptual distance on [-1,1] tensors using pretrained VGG
+# Lower is more similar
+def compute_lpips(lpips_model, x_m11, recon_m11):
+    return lpips_model(x_m11, recon_m11).mean().item()
+
+# Perplexity: exp(-sum p_i log p_i) over usage probs p_i
+def compute_perplexity_from_counts(counts):
+    total = int(counts.sum().item())
+    if total == 0:
+        return 0.0
+    p = counts.float() / total
+    return float(torch.exp(-(p * torch.log(p + 1e-10)).sum()).item())
+
+# Flatten indices to a 1D long tensor
+# Handles indices with shape B×H×W or already flattened
+def flatten_indices(indices):
+    if hasattr(indices, 'ndim') and indices.ndim == 3:
+        return indices.reshape(-1).cpu().long()
+    return indices.flatten().cpu().long()
+
+# Code usage counts (histogram)
+# counts[k] = number of assignments to code k
+def compute_code_usage_counts(inds, n_codes):
+    return torch.bincount(inds, minlength=n_codes)
+
+# Used/dead code counts
+# used = |{k : counts[k] > 0}|, dead = n_codes - used
+def compute_used_dead_codes(counts, n_codes):
+    used = int((counts > 0).sum().item())
+    dead = int(n_codes - used)
+    return used, dead
+
+# Total tokens assigned
+# total = sum_k counts[k]
+def compute_total_tokens(counts):
+    return int(counts.sum().item())
+
+def gather_uniform_samples(roots, limit):
+    exts = ("*.JPEG","*.JPG","*.jpg")
+    n = len(roots)
+    if n == 0 or limit <= 0:
+        return []
+    base = limit // n
+    rem = limit % n
+    selected = []
+    used = set()
+    all_files = []
+    per_root_files = []
+    for r in roots:
+        files = []
+        for e in exts:
+            files.extend(glob.glob(os.path.join(r, e)))
+        random.shuffle(files)
+        per_root_files.append(files)
+        all_files.extend(files)
+    for i, files in enumerate(per_root_files):
+        need = base + (1 if i < rem else 0)
+        take = min(need, len(files))
+        chosen = files[:take]
+        selected.extend(chosen)
+        used.update(chosen)
+    if len(selected) < limit:
+        remaining = [f for f in all_files if f not in used]
+        random.shuffle(remaining)
+        fill = remaining[:(limit - len(selected))]
+        selected.extend(fill)
+    random.shuffle(selected)
+    return selected[:limit]
+
 def print_codebook(model, limit=None):
     q = model.quantize
     emb = getattr(q, "embedding", None)
     if emb is None:
+        print("embedding not found, using embed")
         emb = getattr(q, "embed", None)
     w = emb.weight.detach().cpu()
     print("codebook shape:", tuple(w.shape))
@@ -85,14 +164,9 @@ def main():
     total_mse = 0.0
     total_lpips = 0.0
     n_images = 0
+    per_image = []
 
-    exts = ("*.JPEG","*.JPG","*.jpg")
-    pictures = []
-    for e in exts:
-        pictures.extend(glob.glob(os.path.join(IMAGENET_ROOT, e)))
-    random.shuffle(pictures)
-
-    pictures = pictures[:LIMIT]
+    pictures = gather_uniform_samples(IMAGENET_ROOTS, LIMIT)
 
     for picture in pictures:
         x = preprocess(picture, SIZE).unsqueeze(0).to(device)
@@ -102,14 +176,15 @@ def main():
         orig = to_01(x)[0]
         rec = to_01(recon)[0]
         # metrics 
-        mse = torch.mean((orig - rec) ** 2).item()
-        lp = lpips(x, recon).mean().item()
+        mse = compute_mse(orig, rec)
+        lp = compute_lpips(lpips, x, recon)
         inds = info[2]
-        inds = torch.flatten(inds).cpu().long()
-        counts += torch.bincount(inds, minlength=n_codes)
+        inds = flatten_indices(inds)
+        counts += compute_code_usage_counts(inds, n_codes)
         total_mse += mse
         total_lpips += lp
         n_images += 1
+        per_image.append({"path": picture, "mse": mse, "lpips": lp})
         
         base = os.path.splitext(os.path.basename(picture))[0]
         save_image(orig, os.path.join(OUTDIR, f"orig_{base}.png"))
@@ -119,16 +194,27 @@ def main():
     if n_images > 0:
         avg_mse = total_mse / n_images
         avg_lpips = total_lpips / n_images
-        total_tokens = int(counts.sum().item())
-        used = int((counts > 0).sum().item())
-        dead = int(n_codes - used)
-        if total_tokens > 0:
-            p = counts.float() / total_tokens
-            perplexity = float(torch.exp(-(p * torch.log(p + 1e-10)).sum()).item())
-        else:
-            perplexity = 0.0
+        total_tokens = compute_total_tokens(counts)
+        used, dead = compute_used_dead_codes(counts, n_codes)
+        perplexity = compute_perplexity_from_counts(counts)
         print(f"summary n={n_images} mse={avg_mse:.6f} lpips={avg_lpips:.6f}")
         print(f"codes used={used}/{n_codes} dead={dead} tokens={total_tokens} perplexity={perplexity:.2f}")
+        summary = {
+            "timestamp": STAMP,
+            "roots": IMAGENET_ROOTS,
+            "limit": LIMIT,
+            "num_images": n_images,
+            "avg_mse": avg_mse,
+            "avg_lpips": avg_lpips,
+            "n_codes": int(n_codes),
+            "used_codes": used,
+            "dead_codes": dead,
+            "total_tokens": total_tokens,
+            "perplexity": perplexity,
+            "per_image": per_image,
+        }
+        with open(os.path.join(OUTDIR, f"{STAMP}_summary.json"), "w") as f:
+            json.dump(summary, f, indent=2)
 
 if __name__ == "__main__":
     main()
