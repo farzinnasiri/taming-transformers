@@ -18,15 +18,17 @@ RUN apt-get update && apt-get install -y \
 
 # Add user with its groups
 USER 0
-RUN IFS=";" read -a myarr <<< "$USER_GADD_ARGS" && \
-    unset 'myarr[${#arr[@]}-1]' && \
-    for i in ${!myarr[@]}; do \
-        if [[ ${myarr[$i]} != "sudo"* ]]; then \
-            groupadd -f -g ${myarr[$i]}; \
-        fi \
-    done
-RUN  useradd -u $USER_UID -g $USER_GID -m $USERNAME
+RUN if [ -n "$USER_GADD_ARGS" ]; then \
+        IFS=';' read -ra myarr <<< "$USER_GADD_ARGS"; \
+        for gid in "${myarr[@]}"; do \
+            if [ -n "$gid" ] && [[ "$gid" != sudo* ]]; then \
+                groupadd -f -g "$gid" "grp$gid" || true; \
+            fi; \
+        done; \
+    fi
+RUN groupadd -f -g $USER_GID $USERNAME && useradd -u $USER_UID -g $USER_GID -m $USERNAME
 RUN for g in $USER_GNAMES; do \
+        groupadd -f "$g" || true; \
         usermod -a -G $g $USERNAME; \
     done
 # Allow sudo
