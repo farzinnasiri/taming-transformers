@@ -17,20 +17,20 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Add user with its groups
-USER 0
-RUN if [ -n "$USER_GADD_ARGS" ]; then \
-        IFS=';' read -ra myarr <<< "$USER_GADD_ARGS"; \
-        for gid in "${myarr[@]}"; do \
-            if [ -n "$gid" ] && [[ "$gid" != sudo* ]]; then \
-                groupadd -f -g "$gid" "grp$gid" || true; \
-            fi; \
-        done; \
-    fi
-RUN groupadd -f -g $USER_GID $USERNAME && useradd -u $USER_UID -g $USER_GID -m $USERNAME
-RUN for g in $USER_GNAMES; do \
-        groupadd -f "$g" || true; \
-        usermod -a -G $g $USERNAME; \
-    done
+# USER 0
+# RUN if [ -n "$USER_GADD_ARGS" ]; then \
+#         IFS=';' read -ra myarr <<< "$USER_GADD_ARGS"; \
+#         for gid in "${myarr[@]}"; do \
+#             if [ -n "$gid" ] && [[ "$gid" != sudo* ]]; then \
+#                 groupadd -f -g "$gid" "grp$gid" || true; \
+#             fi; \
+#         done; \
+#     fi
+# RUN groupadd -f -g $USER_GID $USERNAME && useradd -u $USER_UID -g $USER_GID -m $USERNAME
+# RUN for g in $USER_GNAMES; do \
+#         groupadd -f "$g" || true; \
+#         usermod -a -G $g $USERNAME; \
+#     done
 # Allow sudo
 RUN     apt-get install -y sudo \
         && echo $USERNAME ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/$USERNAME \
