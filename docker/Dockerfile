@@ -93,4 +93,4 @@ WORKDIR /home/$USERNAME/exp
 #   -v $(pwd):/app \
 #   -v $(pwd)/../checkpoints:/checkpoints \
 #   -w /app \
-#   nasiri/taming:latest python run.py
+#   nasiri/taming:latest python run.py 

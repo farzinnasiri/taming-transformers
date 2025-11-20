@@ -317,10 +317,11 @@ def main():
         n_images += 1
         per_image.append({"path": picture, "mse": mse, "lpips": lp, "psnr": (psnr if math.isfinite(psnr) else None), "ssim": ssim})
         
-        base = os.path.splitext(os.path.basename(picture))[0]
-        save_image(orig, os.path.join(OUTDIR, f"orig_{base}.png"))
-        save_image(rec, os.path.join(OUTDIR, f"recon_{base}.png"))
-        psnr_str = f"{psnr:.2f}" if math.isfinite(psnr) else "inf"
+        # store generated images
+        # base = os.path.splitext(os.path.basename(picture))[0]
+        # save_image(orig, os.path.join(OUTDIR, f"orig_{base}.png"))
+        # save_image(rec, os.path.join(OUTDIR, f"recon_{base}.png"))
+        # psnr_str = f"{psnr:.2f}" if math.isfinite(psnr) else "inf"
         # print(f"{base} mse={mse:.6f} lpips={lp:.6f} psnr={psnr_str} ssim={ssim:.4f}")
 
     if n_images > 0:
