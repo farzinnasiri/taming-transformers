@@ -32,14 +32,25 @@ RUN apt-get update && apt-get install -y \
 #         usermod -a -G $g $USERNAME; \
 #     done
 # Allow sudo
-RUN     apt-get install -y sudo \
-        && echo $USERNAME ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/$USERNAME \
-        && chmod 0440 /etc/sudoers.d/$USERNAME
+# RUN     apt-get install -y sudo \
+#         && echo $USERNAME ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/$USERNAME \
+#         && chmod 0440 /etc/sudoers.d/$USERNAME
 
 USER $USERNAME
 WORKDIR /home/$USERNAME
 
 ENV PATH="/home/$USERNAME/.local/bin:${PATH}"
+
+RUN python -m pip install --upgrade pip && \
+    pip install --no-cache-dir \
+      tensorflow-cpu==2.9.0 \
+      numpy==1.23.5 \
+      scipy==1.10.1 \
+      tqdm \
+      requests
+
+
+COPY evaluator.py /work/evaluator.py
 
 # -- Create folders under root for following services
 USER 0
@@ -59,19 +70,6 @@ RUN touch /.netrc
 RUN chmod 777 /.netrc
 RUN mkdir -p /.cache
 RUN chmod -R 777 /.cache
-
-USER $USERNAME
-
-RUN python -m pip install --upgrade pip && \
-    pip install --no-cache-dir \
-      tensorflow-cpu==2.9.0 \
-      numpy==1.23.5 \
-      scipy==1.10.1 \
-      tqdm \
-      requests
-
-
-COPY evaluator.py /work/evaluator.py
 
 CMD ["bash"]
 
