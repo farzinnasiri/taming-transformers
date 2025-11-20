@@ -51,6 +51,10 @@ SIZE = 256 # size to resize smallest side to, then center crop
 LIMIT = 500 # limit for number of images to process
 CODEBOOK_PRINT_LIMIT = 16
 CODEBOOK_NPY_SAVE_PATH = os.path.join(OUTDIR, "codebook.npy")
+IMAGENET_VAL_ROOT = "/datasets/imagenet/val"
+EXPORT_BATCH_SIZE = 32
+EXPORT_NPZ_PATH = os.path.join(OUTDIR, f"{STAMP}_imagenet256_recon.npz")
+EXPORT_IMAGENET_NPZ = True
 
 def load_model(config_path, ckpt_path, device):
     config = OmegaConf.load(config_path)
@@ -188,6 +192,57 @@ def gather_uniform_samples(roots, limit):
     random.shuffle(selected)
     return selected[:limit]
 
+def list_imagenet_val_dirs(root):
+    return sorted([d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))])
+
+def gather_val_paths_and_labels(root):
+    exts = ("*.JPEG","*.JPG","*.jpg")
+    classes = list_imagenet_val_dirs(root)
+    paths = []
+    labels = []
+    for li, wnid in enumerate(classes):
+        files = []
+        for e in exts:
+            files.extend(glob.glob(os.path.join(root, wnid, e)))
+        files = sorted(files)
+        if len(files) < 50:
+            raise RuntimeError(f"class {wnid} has {len(files)} images, expected 50")
+        files = files[:50]
+        paths.extend(files)
+        labels.extend([li]*len(files))
+    return paths, labels
+
+def batch_to_uint8_hwc(x):
+    y = to_01(x).mul(255.0).round().clamp(0,255).to(torch.uint8)
+    y = y.permute(0,2,3,1).contiguous()
+    return y.detach().cpu().numpy()
+
+def export_imagenet_val_npz(model, val_root, out_npz_path, batch_size):
+    device = next(model.parameters()).device
+    paths, labels = gather_val_paths_and_labels(val_root)
+    n = len(paths)
+    tmp_memmap_path = os.path.join(OUTDIR, "tmp_arr0_uint8_memmap.npy")
+    mm = np.memmap(tmp_memmap_path, dtype=np.uint8, mode='w+', shape=(n, SIZE, SIZE, 3))
+    idx = 0
+    while idx < n:
+        bs = min(batch_size, n - idx)
+        batch_paths = paths[idx:idx+bs]
+        xs = []
+        for p in batch_paths:
+            xs.append(preprocess(p, SIZE).unsqueeze(0))
+        x = torch.cat(xs, 0).to(device)
+        with torch.no_grad():
+            quant, _, _ = model.encode(x)
+            recon = model.decode(quant)
+        arr = batch_to_uint8_hwc(recon)
+        mm[idx:idx+bs] = arr
+        idx += bs
+        if idx % 1000 == 0:
+            print(f"wrote {idx}/{n}")
+    mm.flush()
+    np.savez_compressed(out_npz_path, arr_0=mm, arr_1=np.array(labels, dtype=np.int64))
+    print(f"saved npz: {out_npz_path}")
+
 def print_codebook(model, limit=None):
     q = model.quantize
     emb = getattr(q, "embedding", None)
@@ -215,6 +270,9 @@ def main():
     model = load_model(CONFIG_PATH, MODEL_PATH, device)
     print_codebook(model, CODEBOOK_PRINT_LIMIT)
     save_codebook_npy(model, CODEBOOK_NPY_SAVE_PATH)
+
+    if EXPORT_IMAGENET_NPZ:
+        export_imagenet_val_npz(model, IMAGENET_VAL_ROOT, EXPORT_NPZ_PATH, EXPORT_BATCH_SIZE)
 
     # we use the LPIPS code already in the repo
     lpips = LPIPS().to(device).eval()
