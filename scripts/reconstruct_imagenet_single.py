@@ -61,16 +61,24 @@ def load_model(config_path, ckpt_path, device):
     return model
 
 def resize_smallest_max(img, size):
+    # Match training preprocessing: resize smallest side to `size` while preserving aspect ratio.
+    # Training uses `SmallestMaxSize` followed by a crop at the same `size` (see taming/data/imagenet.py:244-270).
     s = min(img.size)
     scale = size / s
     return img.resize((int(img.width * scale), int(img.height * scale)), Image.BICUBIC)
 
 def center_crop(img, size):
+    # Center crop to `size×size` to align with the training pipeline.
+    # Produces fixed 256×256 inputs for VQGAN so the latent grid is 16×16 (stride 16).
+    # Reference for training crop: taming/data/imagenet.py:244-270 (CenterCrop vs RandomCrop).
     left = (img.width - size) // 2
     top = (img.height - size) // 2
     return img.crop((left, top, left + size, top + size))
 
 def preprocess(path, size):
+    # Preprocessing mirrors training: resize smallest side to `size` then center crop.
+    # This ensures evaluation uses the same distribution of inputs as the model was trained on.
+    # See training preprocessor in taming/data/imagenet.py:244-270.
     img = Image.open(path).convert("RGB")
     img = resize_smallest_max(img, size)
     img = center_crop(img, size)
@@ -79,9 +87,10 @@ def preprocess(path, size):
     x = torch.from_numpy(arr).permute(2,0,1)
     return x
 
+# convert [-1,1] tensors to [0,1] for metrics calculation
 def to_01(x):
-    x = x.clamp(-1,1)
-    return (x + 1) / 2
+    x = x.clamp(-1,1) # fix out of range values
+    return (x + 1) / 2 # linear shift
 
 # MSE: mean of squared differences in [0,1]
 # MSE(x, y) = mean((x - y)^2)
@@ -100,9 +109,10 @@ def compute_psnr(mse):
         return float('inf')
     return 10.0 * math.log10(1.0 / mse)
 
+# Calculaing Global SSIM (not patch based)
 # SSIM: structural similarity index averaged over channels (global variant)
 # SSIM(x, y) = ((2μxμy + C1)(2σxy + C2)) / ((μx^2 + μy^2 + C1)(σx^2 + σy^2 + C2))
-# Inputs are [0,1] C×H×W tensors
+# Inputs are [0,1] C×H×W tensors 
 def compute_ssim(orig01, rec01, c1=0.01**2, c2=0.03**2):
     x = orig01
     y = rec01
@@ -206,8 +216,10 @@ def main():
     print_codebook(model, CODEBOOK_PRINT_LIMIT)
     save_codebook_npy(model, CODEBOOK_NPY_SAVE_PATH)
 
+    # we use the LPIPS code already in the repo
     lpips = LPIPS().to(device).eval()
     n_codes = getattr(model.quantize, "n_e", getattr(model.quantize, "n_embed", None))
+    print(f"n_codes: {n_codes}")
     counts = torch.zeros(n_codes, dtype=torch.long)
     total_mse = 0.0
     total_lpips = 0.0
@@ -221,11 +233,12 @@ def main():
 
     for picture in pictures:
         x = preprocess(picture, SIZE).unsqueeze(0).to(device)
+        # encode and decode the image to get the reconstracted image
         with torch.no_grad():
             quant, _, info = model.encode(x)
             recon = model.decode(quant)
-        orig = to_01(x)[0]
-        rec = to_01(recon)[0]
+        orig = to_01(x)[0] # picking the full image (C, H, W)
+        rec = to_01(recon)[0] 
         # metrics 
         mse = compute_mse(orig, rec)
         lp = compute_lpips(lpips, x, recon)
@@ -247,7 +260,7 @@ def main():
         save_image(orig, os.path.join(OUTDIR, f"orig_{base}.png"))
         save_image(rec, os.path.join(OUTDIR, f"recon_{base}.png"))
         psnr_str = f"{psnr:.2f}" if math.isfinite(psnr) else "inf"
-        print(f"{base} mse={mse:.6f} lpips={lp:.6f} psnr={psnr_str} ssim={ssim:.4f}")
+        # print(f"{base} mse={mse:.6f} lpips={lp:.6f} psnr={psnr_str} ssim={ssim:.4f}")
 
     if n_images > 0:
         avg_mse = total_mse / n_images
