@@ -12,16 +12,12 @@ SHELL ["/bin/bash", "-c"]
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-USER root
 RUN apt-get update && apt-get install -y \
     build-essential ca-certificates git wget curl \
-    sudo passwd && rm -rf /var/lib/apt/lists/*
-
-# Create folders under root for following services
-RUN mkdir -p /.local /.config /.cache /.avalanche && chmod -R 777 /.local /.config /.cache /.avalanche && \
-    touch /.netrc && chmod 777 /.netrc
+    && rm -rf /var/lib/apt/lists/*
 
 # Add user with its groups
+USER 0
 RUN IFS=";" read -a myarr <<< "$USER_GADD_ARGS" && \
     unset 'myarr[${#arr[@]}-1]' && \
     for i in ${!myarr[@]}; do \
@@ -29,16 +25,41 @@ RUN IFS=";" read -a myarr <<< "$USER_GADD_ARGS" && \
             groupadd -f -g ${myarr[$i]}; \
         fi \
     done
-RUN useradd -u $USER_UID -g $USER_GID -m $USERNAME && \
-    for g in $USER_GNAMES; do usermod -a -G $g $USERNAME; done && \
-    echo $USERNAME ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/$USERNAME && \
-    chmod 0440 /etc/sudoers.d/$USERNAME
+RUN  useradd -u $USER_UID -g $USER_GID -m $USERNAME
+RUN for g in $USER_GNAMES; do \
+        usermod -a -G $g $USERNAME; \
+    done
+# Allow sudo
+RUN     apt-get install -y sudo \
+        && echo $USERNAME ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/$USERNAME \
+        && chmod 0440 /etc/sudoers.d/$USERNAME
 
 USER $USERNAME
 WORKDIR /home/$USERNAME
+
 ENV PATH="/home/$USERNAME/.local/bin:${PATH}"
 
-USER root
+# -- Create folders under root for following services
+USER 0
+
+# Enable jupyter
+RUN mkdir -p /.local
+RUN chmod -R 777 /.local
+
+# Enable avalanche
+RUN mkdir -p /.avalanche
+RUN chmod -R 777 /.avalanche
+
+# Enable wandb
+RUN mkdir -p /.config
+RUN chmod -R 777 /.config
+RUN touch /.netrc
+RUN chmod 777 /.netrc
+RUN mkdir -p /.cache
+RUN chmod -R 777 /.cache
+
+USER $USERNAME
+
 RUN python -m pip install --upgrade pip && \
     pip install --no-cache-dir \
       tensorflow-cpu==2.9.0 \
@@ -47,12 +68,6 @@ RUN python -m pip install --upgrade pip && \
       tqdm \
       requests
 
-# Optional apt/pip requirements via files
-ADD $APT_REQ_FILE /apt_requirements.txt
-RUN apt-get update && cat /apt_requirements.txt | xargs apt-get install -y
-
-USER $USERNAME
-WORKDIR /home/$USERNAME/exp
 
 COPY evaluator.py /work/evaluator.py
 
