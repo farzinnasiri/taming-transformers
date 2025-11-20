@@ -9,6 +9,7 @@ import numpy as np
 from PIL import Image
 from omegaconf import OmegaConf
 from torchvision.utils import save_image
+from tqdm import tqdm
 import sys
 sys.path.append('.')
 from taming.modules.losses.lpips import LPIPS
@@ -55,6 +56,7 @@ IMAGENET_VAL_ROOT = "/datasets/imagenet/val"
 EXPORT_BATCH_SIZE = 32
 EXPORT_NPZ_PATH = os.path.join(OUTDIR, f"{STAMP}_imagenet256_recon.npz")
 EXPORT_IMAGENET_NPZ = True
+SAVE_CODEBOOK_NPY = False
 
 def load_model(config_path, ckpt_path, device):
     config = OmegaConf.load(config_path)
@@ -223,22 +225,22 @@ def export_imagenet_val_npz(model, val_root, out_npz_path, batch_size):
     n = len(paths)
     tmp_memmap_path = os.path.join(OUTDIR, "tmp_arr0_uint8_memmap.npy")
     mm = np.memmap(tmp_memmap_path, dtype=np.uint8, mode='w+', shape=(n, SIZE, SIZE, 3))
-    idx = 0
-    while idx < n:
-        bs = min(batch_size, n - idx)
-        batch_paths = paths[idx:idx+bs]
-        xs = []
-        for p in batch_paths:
-            xs.append(preprocess(p, SIZE).unsqueeze(0))
-        x = torch.cat(xs, 0).to(device)
-        with torch.no_grad():
-            quant, _, _ = model.encode(x)
-            recon = model.decode(quant)
-        arr = batch_to_uint8_hwc(recon)
-        mm[idx:idx+bs] = arr
-        idx += bs
-        if idx % 1000 == 0:
-            print(f"wrote {idx}/{n}")
+    with tqdm(total=n, desc="Exporting ImageNet256 recon", unit="img") as pbar:
+        idx = 0
+        while idx < n:
+            bs = min(batch_size, n - idx)
+            batch_paths = paths[idx:idx+bs]
+            xs = []
+            for p in batch_paths:
+                xs.append(preprocess(p, SIZE).unsqueeze(0))
+            x = torch.cat(xs, 0).to(device)
+            with torch.no_grad():
+                quant, _, _ = model.encode(x)
+                recon = model.decode(quant)
+            arr = batch_to_uint8_hwc(recon)
+            mm[idx:idx+bs] = arr
+            idx += bs
+            pbar.update(bs)
     mm.flush()
     np.savez_compressed(out_npz_path, arr_0=mm, arr_1=np.array(labels, dtype=np.int64))
     print(f"saved npz: {out_npz_path}")
@@ -269,7 +271,8 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = load_model(CONFIG_PATH, MODEL_PATH, device)
     print_codebook(model, CODEBOOK_PRINT_LIMIT)
-    save_codebook_npy(model, CODEBOOK_NPY_SAVE_PATH)
+    if SAVE_CODEBOOK_NPY:
+        save_codebook_npy(model, CODEBOOK_NPY_SAVE_PATH)
 
     if EXPORT_IMAGENET_NPZ:
         export_imagenet_val_npz(model, IMAGENET_VAL_ROOT, EXPORT_NPZ_PATH, EXPORT_BATCH_SIZE)
