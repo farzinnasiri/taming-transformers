@@ -57,8 +57,8 @@ EXPORT_BATCH_SIZE = 32
 EXPORT_NPZ_PATH = os.path.join(OUTDIR, f"{STAMP}_imagenet256_recon.npz")
 EXPORT_IMAGENET_NPZ = False
 SAVE_CODEBOOK_NPY = False
-RUN_METRICS_ON_VAL = True
-RUN_METRICS_ON_CLASS_SUBSET = False
+RUN_METRICS_ON_VAL = False
+RUN_METRICS_ON_CLASS_SUBSET = True
 
 def load_model(config_path, ckpt_path, device):
     config = OmegaConf.load(config_path)
