@@ -49,14 +49,16 @@ IMAGENET_ROOTS = [
 STAMP = int(time.time())
 OUTDIR = f"{STAMP}_recon_imagenet_single"
 SIZE = 256 # size to resize smallest side to, then center crop
-LIMIT = 500 # limit for number of images to process
+LIMIT = 500 # limit for number of images to process, only if RUN_METRICS_ON_CLASS_SUBSET is True
 CODEBOOK_PRINT_LIMIT = 16
 CODEBOOK_NPY_SAVE_PATH = os.path.join(OUTDIR, "codebook.npy")
 IMAGENET_VAL_ROOT = "/datasets/imagenet/val"
 EXPORT_BATCH_SIZE = 32
 EXPORT_NPZ_PATH = os.path.join(OUTDIR, f"{STAMP}_imagenet256_recon.npz")
-EXPORT_IMAGENET_NPZ = True
+EXPORT_IMAGENET_NPZ = False
 SAVE_CODEBOOK_NPY = False
+RUN_METRICS_ON_VAL = True
+RUN_METRICS_ON_CLASS_SUBSET = False
 
 def load_model(config_path, ckpt_path, device):
     config = OmegaConf.load(config_path)
@@ -248,9 +250,6 @@ def export_imagenet_val_npz(model, val_root, out_npz_path, batch_size):
 def print_codebook(model, limit=None):
     q = model.quantize
     emb = getattr(q, "embedding", None)
-    if emb is None:
-        print("embedding not found, using embed")
-        emb = getattr(q, "embed", None)
     w = emb.weight.detach().cpu()
     print("codebook shape:", tuple(w.shape))
     if limit is None:
@@ -261,10 +260,71 @@ def print_codebook(model, limit=None):
 def save_codebook_npy(model, path):
     q = model.quantize
     emb = getattr(q, "embedding", None)
-    if emb is None:
-        emb = getattr(q, "embed", None)
     w = emb.weight.detach().cpu().numpy()
     np.save(path, w)
+
+def run_metrics_on_paths(model, paths, device, lpips_model):
+    n_codes = getattr(model.quantize, "n_e", getattr(model.quantize, "n_embed", None))
+    counts = torch.zeros(n_codes, dtype=torch.long)
+    total_mse = 0.0
+    total_lpips = 0.0
+    total_psnr = 0.0
+    psnr_count = 0
+    total_ssim = 0.0
+    n_images = 0
+    per_image = []
+    for p in tqdm(paths, desc="Metrics", unit="img"):
+        x = preprocess(p, SIZE).unsqueeze(0).to(device)
+        with torch.no_grad():
+            quant, _, info = model.encode(x)
+            recon = model.decode(quant)
+        orig = to_01(x)[0]
+        rec = to_01(recon)[0]
+        mse = compute_mse(orig, rec)
+        lp = compute_lpips(lpips_model, x, recon)
+        psnr = compute_psnr(mse)
+        ssim = compute_ssim(orig, rec)
+        inds = flatten_indices(info[2])
+        counts += compute_code_usage_counts(inds, n_codes)
+        total_mse += mse
+        total_lpips += lp
+        if math.isfinite(psnr):
+            total_psnr += psnr
+            psnr_count += 1
+        total_ssim += ssim
+        n_images += 1
+        per_image.append({"path": p, "mse": mse, "lpips": lp, "psnr": (psnr if math.isfinite(psnr) else None), "ssim": ssim})
+    if n_images == 0:
+        return None
+    avg_mse = total_mse / n_images
+    avg_lpips = total_lpips / n_images
+    avg_psnr = (total_psnr / psnr_count) if psnr_count > 0 else float('inf')
+    avg_ssim = total_ssim / n_images
+    # total_tokens = compute_total_tokens(counts)
+    # used, dead = compute_used_dead_codes(counts, n_codes)
+    # perplexity = compute_perplexity_from_counts(counts)
+    return {
+        "timestamp": STAMP,
+        "num_images": n_images,
+        "avg_mse": avg_mse,
+        "avg_lpips": avg_lpips,
+        "avg_psnr": (avg_psnr if math.isfinite(avg_psnr) else None),
+        "avg_ssim": avg_ssim,
+        "n_codes": int(n_codes),
+        # "used_codes": used,
+        # "dead_codes": dead,
+        # "total_tokens": total_tokens,
+        # "perplexity": perplexity,
+        # "per_image": per_image,
+    }
+
+def run_metrics_class_subset(model, device, lpips_model):
+    pictures = gather_uniform_samples(IMAGENET_ROOTS, LIMIT)
+    return run_metrics_on_paths(model, pictures, device, lpips_model)
+
+def run_metrics_val_all(model, val_root, device, lpips_model):
+    paths, _ = gather_val_paths_and_labels(val_root)
+    return run_metrics_on_paths(model, paths, device, lpips_model)
 
 def main():
     os.makedirs(OUTDIR, exist_ok=True)
@@ -277,81 +337,28 @@ def main():
     if EXPORT_IMAGENET_NPZ:
         export_imagenet_val_npz(model, IMAGENET_VAL_ROOT, EXPORT_NPZ_PATH, EXPORT_BATCH_SIZE)
 
-    # we use the LPIPS code already in the repo
     lpips = LPIPS().to(device).eval()
-    n_codes = getattr(model.quantize, "n_e", getattr(model.quantize, "n_embed", None))
-    print(f"n_codes: {n_codes}")
-    counts = torch.zeros(n_codes, dtype=torch.long)
-    total_mse = 0.0
-    total_lpips = 0.0
-    total_psnr = 0.0
-    psnr_count = 0
-    total_ssim = 0.0
-    n_images = 0
-    per_image = []
 
-    pictures = gather_uniform_samples(IMAGENET_ROOTS, LIMIT)
+    if RUN_METRICS_ON_VAL:
+        summary_val = run_metrics_val_all(model, IMAGENET_VAL_ROOT, device, lpips)
+        if summary_val is not None:
+            avg_psnr_val = summary_val["avg_psnr"]
+            psnr_str_val = f"{avg_psnr_val:.2f}" if (avg_psnr_val is not None and math.isfinite(avg_psnr_val)) else "inf"
+            print(f"summary n={summary_val['num_images']} mse={summary_val['avg_mse']:.6f} lpips={summary_val['avg_lpips']:.6f} psnr={psnr_str_val} ssim={summary_val['avg_ssim']:.4f}")
+            print(f"codes used={summary_val['used_codes']}/{summary_val['n_codes']} dead={summary_val['dead_codes']} tokens={summary_val['total_tokens']} perplexity={summary_val['perplexity']:.2f}")
+            with open(os.path.join(OUTDIR, f"{STAMP}_summary_val.json"), "w") as f:
+                json.dump(summary_val, f, indent=2)
 
-    for picture in pictures:
-        x = preprocess(picture, SIZE).unsqueeze(0).to(device)
-        # encode and decode the image to get the reconstracted image
-        with torch.no_grad():
-            quant, _, info = model.encode(x)
-            recon = model.decode(quant)
-        orig = to_01(x)[0] # picking the full image (C, H, W)
-        rec = to_01(recon)[0] 
-        # metrics 
-        mse = compute_mse(orig, rec)
-        lp = compute_lpips(lpips, x, recon)
-        psnr = compute_psnr(mse)
-        ssim = compute_ssim(orig, rec)
-        inds = info[2]
-        inds = flatten_indices(inds)
-        counts += compute_code_usage_counts(inds, n_codes)
-        total_mse += mse
-        total_lpips += lp
-        if math.isfinite(psnr):
-            total_psnr += psnr
-            psnr_count += 1
-        total_ssim += ssim
-        n_images += 1
-        per_image.append({"path": picture, "mse": mse, "lpips": lp, "psnr": (psnr if math.isfinite(psnr) else None), "ssim": ssim})
-        
-        # store generated images
-        # base = os.path.splitext(os.path.basename(picture))[0]
-        # save_image(orig, os.path.join(OUTDIR, f"orig_{base}.png"))
-        # save_image(rec, os.path.join(OUTDIR, f"recon_{base}.png"))
-        # psnr_str = f"{psnr:.2f}" if math.isfinite(psnr) else "inf"
-        # print(f"{base} mse={mse:.6f} lpips={lp:.6f} psnr={psnr_str} ssim={ssim:.4f}")
-
-    if n_images > 0:
-        avg_mse = total_mse / n_images
-        avg_lpips = total_lpips / n_images
-        avg_psnr = (total_psnr / psnr_count) if psnr_count > 0 else float('inf')
-        avg_ssim = total_ssim / n_images
-        total_tokens = compute_total_tokens(counts)
-        used, dead = compute_used_dead_codes(counts, n_codes)
-        perplexity = compute_perplexity_from_counts(counts)
-        psnr_str = f"{avg_psnr:.2f}" if math.isfinite(avg_psnr) else "inf"
-        print(f"summary n={n_images} mse={avg_mse:.6f} lpips={avg_lpips:.6f} psnr={psnr_str} ssim={avg_ssim:.4f}")
-        print(f"codes used={used}/{n_codes} dead={dead} tokens={total_tokens} perplexity={perplexity:.2f}")
-        summary = {
-            "timestamp": STAMP,
-            "limit": LIMIT,
-            "num_images": n_images,
-            "avg_mse": avg_mse,
-            "avg_lpips": avg_lpips,
-            "avg_psnr": (avg_psnr if math.isfinite(avg_psnr) else None),
-            "avg_ssim": avg_ssim,
-            "n_codes": int(n_codes),
-            "used_codes": used,
-            "dead_codes": dead,
-            "total_tokens": total_tokens,
-            "perplexity": perplexity,
-            "per_image": per_image,
-        }
-        with open(os.path.join(OUTDIR, f"{STAMP}_summary.json"), "w") as f:
-            json.dump(summary, f, indent=2)
+    if RUN_METRICS_ON_CLASS_SUBSET:
+        summary_subset = run_metrics_class_subset(model, device, lpips)
+        if summary_subset is not None:
+            summary_subset["limit"] = LIMIT
+            avg_psnr_subset = summary_subset["avg_psnr"]
+            psnr_str_subset = f"{avg_psnr_subset:.2f}" if (avg_psnr_subset is not None and math.isfinite(avg_psnr_subset)) else "inf"
+            print(f"summary n={summary_subset['num_images']} mse={summary_subset['avg_mse']:.6f} lpips={summary_subset['avg_lpips']:.6f} psnr={psnr_str_subset} ssim={summary_subset['avg_ssim']:.4f}")
+            print(f"codes used={summary_subset['used_codes']}/{summary_subset['n_codes']} dead={summary_subset['dead_codes']} tokens={summary_subset['total_tokens']} perplexity={summary_subset['perplexity']:.2f}")
+            with open(os.path.join(OUTDIR, f"{STAMP}_summary_subset.json"), "w") as f:
+                json.dump(summary_subset, f, indent=2)
 
 if __name__ == "__main__":
     main()
