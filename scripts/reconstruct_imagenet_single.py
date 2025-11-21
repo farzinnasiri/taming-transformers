@@ -221,6 +221,8 @@ def batch_to_uint8_hwc(x):
     y = y.permute(0,2,3,1).contiguous()
     return y.detach().cpu().numpy()
 
+# todo, this takes too much time, compared to running the other metrics
+# todo loading the data should be paralized torch dataloader or dataset , torchvision, imagenet
 def export_imagenet_val_npz(model, val_root, out_npz_path, batch_size):
     device = next(model.parameters()).device
     paths, labels = gather_val_paths_and_labels(val_root)
@@ -229,7 +231,7 @@ def export_imagenet_val_npz(model, val_root, out_npz_path, batch_size):
     mm = np.memmap(tmp_memmap_path, dtype=np.uint8, mode='w+', shape=(n, SIZE, SIZE, 3))
     with tqdm(total=n, desc="Exporting ImageNet256 recon", unit="img") as pbar:
         idx = 0
-        while idx < n:
+        while idx < n: 
             bs = min(batch_size, n - idx)
             batch_paths = paths[idx:idx+bs]
             xs = []
@@ -279,7 +281,8 @@ def run_metrics_on_paths(model, paths, device, lpips_model):
             quant, _, info = model.encode(x)
             recon = model.decode(quant)
         orig = to_01(x)[0]
-        rec = to_01(recon)[0]
+        rec = to_01(recon)[0] 
+
         mse = compute_mse(orig, rec)
         lp = compute_lpips(lpips_model, x, recon)
         psnr = compute_psnr(mse)
@@ -345,7 +348,7 @@ def main():
             avg_psnr_val = summary_val["avg_psnr"]
             psnr_str_val = f"{avg_psnr_val:.2f}" if (avg_psnr_val is not None and math.isfinite(avg_psnr_val)) else "inf"
             print(f"summary n={summary_val['num_images']} mse={summary_val['avg_mse']:.6f} lpips={summary_val['avg_lpips']:.6f} psnr={psnr_str_val} ssim={summary_val['avg_ssim']:.4f}")
-            print(f"codes used={summary_val['used_codes']}/{summary_val['n_codes']} dead={summary_val['dead_codes']} tokens={summary_val['total_tokens']} perplexity={summary_val['perplexity']:.2f}")
+            # print(f"codes used={summary_val['used_codes']}/{summary_val['n_codes']} dead={summary_val['dead_codes']} tokens={summary_val['total_tokens']} perplexity={summary_val['perplexity']:.2f}")
             with open(os.path.join(OUTDIR, f"{STAMP}_summary_val.json"), "w") as f:
                 json.dump(summary_val, f, indent=2)
 
@@ -356,7 +359,7 @@ def main():
             avg_psnr_subset = summary_subset["avg_psnr"]
             psnr_str_subset = f"{avg_psnr_subset:.2f}" if (avg_psnr_subset is not None and math.isfinite(avg_psnr_subset)) else "inf"
             print(f"summary n={summary_subset['num_images']} mse={summary_subset['avg_mse']:.6f} lpips={summary_subset['avg_lpips']:.6f} psnr={psnr_str_subset} ssim={summary_subset['avg_ssim']:.4f}")
-            print(f"codes used={summary_subset['used_codes']}/{summary_subset['n_codes']} dead={summary_subset['dead_codes']} tokens={summary_subset['total_tokens']} perplexity={summary_subset['perplexity']:.2f}")
+            # print(f"codes used={summary_subset['used_codes']}/{summary_subset['n_codes']} dead={summary_subset['dead_codes']} tokens={summary_subset['total_tokens']} perplexity={summary_subset['perplexity']:.2f}")
             with open(os.path.join(OUTDIR, f"{STAMP}_summary_subset.json"), "w") as f:
                 json.dump(summary_subset, f, indent=2)
 
