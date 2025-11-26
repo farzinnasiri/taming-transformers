@@ -56,11 +56,11 @@ LIMIT = 50 # limit for number of images to process, only if RUN_METRICS_ON_CLASS
 CODEBOOK_PRINT_LIMIT = 16
 CODEBOOK_NPY_SAVE_PATH = os.path.join(OUTDIR, "codebook.npy")
 IMAGENET_VAL_ROOT = "/datasets/imagenet/val"
-EXPORT_BATCH_SIZE = 8
+EXPORT_BATCH_SIZE = 16
 EXPORT_NPZ_PATH = os.path.join(OUTDIR, f"{STAMP}_imagenet256_recon.npz")
-EXPORT_IMAGENET_NPZ = False
+EXPORT_IMAGENET_NPZ = True
 RUN_METRICS_ON_VAL = False
-RUN_METRICS_ON_CLASS_SUBSET = True
+RUN_METRICS_ON_CLASS_SUBSET = False
 
 def load_model(config_path, ckpt_path, device):
     config = OmegaConf.load(config_path)
@@ -204,10 +204,8 @@ def export_imagenet_val_npz(model, val_root, out_npz_path, batch_size):
         for x01 in tqdm(loader, desc="Encoding/Decoding", unit="batch"):
             x01 = x01.to(device) # a batched tensor produced by the workers
             x = preprocess_vqgan(x01)
-            # torch.cuda.amp.autocast() keeps VRAM use lower by using mixed precision
-            with torch.cuda.amp.autocast():
-                quant, _, _ = model.encode(x)
-                recon = model.decode(quant)
+            quant, _, _ = model.encode(x)
+            recon = model.decode(quant)
 
             arr = batch_to_uint8_hwc(recon)
             all_recons.append(arr)
@@ -244,7 +242,7 @@ def save_codebook_npy(model, path):
     w = emb.weight.detach().cpu().numpy()
     np.save(path, w)
 
-def run_metrics_on_paths(model, paths, device, lpips_model, debug_dir=None):
+def run_metrics_on_paths(model, paths, device, lpips_model):
     total_mse = 0.0
     total_lpips = 0.0
     total_psnr = 0.0
@@ -252,8 +250,6 @@ def run_metrics_on_paths(model, paths, device, lpips_model, debug_dir=None):
     total_ssim = 0.0
     n_images = 0
     per_image = []
-    if debug_dir is not None:
-        os.makedirs(debug_dir, exist_ok=True)
     for p in tqdm(paths, desc="Metrics", unit="img"):
         x01 = preprocess(p, SIZE).unsqueeze(0).to(device)
         x = preprocess_vqgan(x01)
@@ -262,37 +258,6 @@ def run_metrics_on_paths(model, paths, device, lpips_model, debug_dir=None):
             recon = model.decode(quant)
         orig = x01[0]
         rec = to_01(recon)[0]
-
-        if debug_dir is not None:
-            wnid = os.path.basename(os.path.dirname(p))
-            i_str = f"{n_images:06d}_{wnid}"
-            orig_np = (orig.mul(255.0).round().clamp(0,255).to(torch.uint8).permute(1,2,0).contiguous().cpu().numpy())
-            rec_np = (rec.mul(255.0).round().clamp(0,255).to(torch.uint8).permute(1,2,0).contiguous().cpu().numpy())
-            Image.fromarray(orig_np).save(os.path.join(debug_dir, f"{i_str}_orig.png"))
-            Image.fromarray(rec_np).save(os.path.join(debug_dir, f"{i_str}_recon.png"))
-            recon_has_nan = torch.isnan(recon).any().item()
-            recon_min = float(recon.min().item())
-            recon_max = float(recon.max().item())
-            rec_uint8_max = int(rec_np.max())
-            with open(os.path.join(debug_dir, "debug_stats.csv"), "a") as f:
-                f.write(
-                    ",".join([
-                        str(n_images), wnid, p,
-                        str(float(orig.min().item())),
-                        str(float(orig.max().item())),
-                        str(float(orig.mean().item())),
-                        str(float(x.min().item())),
-                        str(float(x.max().item())),
-                        str(recon_min),
-                        str(recon_max),
-                        str(float(recon.mean().item())),
-                        str(int(recon_has_nan)),
-                        str(rec_uint8_max)
-                    ])
-                    + "\n"
-                )
-            if recon_has_nan or rec_uint8_max == 0:
-                print(f"[debug] issue idx={n_images} wnid={wnid} path={p} nan={recon_has_nan} rec_uint8_max={rec_uint8_max} recon_min={recon_min} recon_max={recon_max}")
 
         mse = compute_mse(orig, rec)
         lp = compute_lpips(lpips_model, x, recon)
@@ -325,8 +290,7 @@ def run_metrics_on_paths(model, paths, device, lpips_model, debug_dir=None):
 # This function is for testing purposes 
 def run_metrics_class_subset(model, device, lpips_model):
     pictures = gather_uniform_samples(IMAGENET_ROOTS, LIMIT)
-    debug_dir = os.path.join(OUTDIR, f"{STAMP}_subset_samples")
-    return run_metrics_on_paths(model, pictures, device, lpips_model, debug_dir=debug_dir)
+    return run_metrics_on_paths(model, pictures, device, lpips_model)
 
 def run_metrics_val_all(model, val_root, device, lpips_model):
     paths, _ = gather_val_paths_and_labels(val_root)
