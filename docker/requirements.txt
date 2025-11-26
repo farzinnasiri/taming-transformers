@@ -11,3 +11,4 @@ streamlit>=0.73.1
 einops==0.3.0
 more-itertools>=8.0.0
 transformers==4.3.1
+scikit-image==0.18.3
