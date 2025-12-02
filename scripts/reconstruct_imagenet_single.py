@@ -199,6 +199,7 @@ def export_imagenet_val_npz(model, val_root, out_npz_path, batch_size):
     print(f"Exporting ImageNet256 recon to {out_npz_path}")
     
     all_recons = []
+    audit = {}
     
     with torch.no_grad():
         for x01 in tqdm(loader, desc="Encoding/Decoding", unit="batch"):
@@ -207,6 +208,7 @@ def export_imagenet_val_npz(model, val_root, out_npz_path, batch_size):
             quant, _, _ = model.encode(x)
             recon = model.decode(quant)
 
+            audit_stats(audit, recon, finalize=False)
             arr = batch_to_uint8_hwc(recon)
             all_recons.append(arr)
             
@@ -225,6 +227,7 @@ def export_imagenet_val_npz(model, val_root, out_npz_path, batch_size):
     print(f"  first 5 labels: {labels[:5]}")
     print(f"  last 5 labels:  {labels[-5:]}")
     print(f"  total images: {len(full_arr)}  unique labels: {len(np.unique(labels))}")
+    audit_stats(audit, None, finalize=True)
 
 def print_codebook(model, limit=None):
     q = model.quantize
@@ -241,6 +244,39 @@ def save_codebook_npy(model, path):
     emb = getattr(q, "embedding", None)
     w = emb.weight.detach().cpu().numpy()
     np.save(path, w)
+
+def audit_stats(stats, recon, finalize=False):
+    if not finalize:
+        t = recon
+        gmin = float(t.min().item())
+        gmax = float(t.max().item())
+        stats["global_min"] = min(stats.get("global_min", gmin), gmin)
+        stats["global_max"] = max(stats.get("global_max", gmax), gmax)
+        n = int(t.numel())
+        stats["total_pixels"] = stats.get("total_pixels", 0) + n
+        oor = int(((t < -1.0) | (t > 1.0)).sum().item())
+        stats["out_of_range_pixels"] = stats.get("out_of_range_pixels", 0) + oor
+        clamped = t.clamp(-1.0, 1.0)
+        sse = float(torch.sum((t - clamped) ** 2).item())
+        stats["clamp_sse"] = stats.get("clamp_sse", 0.0) + sse
+        stats["clamp_count"] = stats.get("clamp_count", 0) + n
+        mean_c = t.mean(dim=[0,2,3])
+        var_c = t.var(dim=[0,2,3], unbiased=False)
+        stats["channel_sum"] = stats.get("channel_sum", torch.zeros_like(mean_c)) + mean_c
+        stats["channel_var_sum"] = stats.get("channel_var_sum", torch.zeros_like(var_c)) + var_c
+        stats["channel_batches"] = stats.get("channel_batches", 0) + 1
+        return stats
+    clamp_mse = (stats.get("clamp_sse", 0.0) / max(1, stats.get("clamp_count", 0)))
+    b = max(1, stats.get("channel_batches", 0))
+    m = stats.get("channel_sum", torch.tensor([0.0,0.0,0.0])) / b
+    v = stats.get("channel_var_sum", torch.tensor([0.0,0.0,0.0])) / b
+    print(
+        f"[audit] global_min={stats.get('global_min')} global_max={stats.get('global_max')} total_pixels={stats.get('total_pixels')} out_of_range_pixels={stats.get('out_of_range_pixels')}"
+    )
+    print(f"[audit] clamp_mse={clamp_mse}")
+    cm = m.detach().cpu().numpy().tolist()
+    cv = v.detach().cpu().numpy().tolist()
+    print(f"[audit] channel_mean={cm} channel_var={cv}")
 
 def run_metrics_on_paths(model, paths, device, lpips_model):
     total_mse = 0.0
