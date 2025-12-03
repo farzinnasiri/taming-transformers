@@ -47,10 +47,13 @@ RUN python -m pip install --upgrade pip && \
       numpy==1.23.5 \
       scipy==1.10.1 \
       tqdm \
-      requests
-
+      requests \
+      torch \
+      torchvision \
+      torch-fidelity
 
 COPY evaluator.py /work/evaluator.py
+COPY eval_fidelity.py /work/eval_fidelity.py
 
 # -- Create folders under root for following services
 USER 0
@@ -75,6 +78,9 @@ CMD ["bash"]
 
 # Build:
 #   docker build -t nasiri/evaluator:latest -f eval/Dockerfile .
-# Run:
+# Run (TensorFlow evaluator):
 #   docker run --rm -it -v /srv/npz:/data -w /data nasiri/evaluator:latest \
 #     python /work/evaluator.py /data/VIRTUAL_imagenet256_labeled.npz /data/1733664935_imagenet256_recon.npz
+# Run (Torch-Fidelity evaluator):
+#   docker run --rm -it --gpus all -v /srv/npz:/data -w /data nasiri/evaluator:latest \
+#     python /work/eval_fidelity.py /data/VIRTUAL_imagenet256_labeled.npz /data/1733664935_imagenet256_recon.npz --output /data/metrics.json

@@ -208,7 +208,7 @@ def export_imagenet_val_npz(model, val_root, out_npz_path, batch_size):
             quant, _, _ = model.encode(x)
             recon = model.decode(quant)
 
-            audit_stats(audit, recon, finalize=False)
+            # audit_stats(audit, recon, finalize=False)
             arr = batch_to_uint8_hwc(recon)
             all_recons.append(arr)
             
@@ -227,7 +227,7 @@ def export_imagenet_val_npz(model, val_root, out_npz_path, batch_size):
     print(f"  first 5 labels: {labels[:5]}")
     print(f"  last 5 labels:  {labels[-5:]}")
     print(f"  total images: {len(full_arr)}  unique labels: {len(np.unique(labels))}")
-    audit_stats(audit, None, finalize=True)
+    # audit_stats(audit, None, finalize=True)
 
 def print_codebook(model, limit=None):
     q = model.quantize
