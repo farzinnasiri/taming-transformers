@@ -50,8 +50,9 @@ def main():
 
     # Register datasets so torch-fidelity can find them by name
     # We use unique names based on file paths to avoid collisions if running multiple times in same process (unlikely here but good practice)
-    torch_fidelity.register_dataset("ref_dataset", lambda: NpzDataset(args.ref_batch))
-    torch_fidelity.register_dataset("sample_dataset", lambda: NpzDataset(args.sample_batch))
+    # torch-fidelity passes (root, download) to the factory function, so we must accept them (and ignore them)
+    torch_fidelity.register_dataset("ref_dataset", lambda root, download: NpzDataset(args.ref_batch))
+    torch_fidelity.register_dataset("sample_dataset", lambda root, download: NpzDataset(args.sample_batch))
 
     print("Calculating metrics...")
     metrics = torch_fidelity.calculate_metrics(
