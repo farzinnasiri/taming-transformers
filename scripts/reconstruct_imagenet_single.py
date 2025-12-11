@@ -260,15 +260,26 @@ def audit_stats(stats, recon, finalize=False):
         sse = float(torch.sum((t - clamped) ** 2).item())
         stats["clamp_sse"] = stats.get("clamp_sse", 0.0) + sse
         stats["clamp_count"] = stats.get("clamp_count", 0) + n
-        mean_c = t.mean(dim=[0,2,3])
-        var_c = t.var(dim=[0,2,3], unbiased=False)
+        # compute the mean pixel value for each RGB channel across the whole batch (ignore H and W)
+        # Assuming shape of tensor t is [B, C, H, W] (batch, RGB channels, height, width)
+        mean_c = t.mean(dim=[0,2,3]) # 0: batch, 2: height, 3: width -> leaving you with 3 values - one mean per RGB channel.
+        # compute the variance for each RGB channel across the whole batch (ignore H and W)
+        var_c = t.var(dim=[0,2,3], unbiased=False) # unbiased=False: divide by N instead of N-1
+        # keep a running sum of channel means so we can average them later
         stats["channel_sum"] = stats.get("channel_sum", torch.zeros_like(mean_c)) + mean_c
+        # keep a running sum of channel variances so we can average them later
         stats["channel_var_sum"] = stats.get("channel_var_sum", torch.zeros_like(var_c)) + var_c
+        # count how many batches we've processed so far
         stats["channel_batches"] = stats.get("channel_batches", 0) + 1
+        # hand the updated stats dict back to the caller
         return stats
+    # compute the mean-squared-error introduced by clamping pixels to [-1,1]
     clamp_mse = (stats.get("clamp_sse", 0.0) / max(1, stats.get("clamp_count", 0)))
+    # number of batches used for channel stats (avoid divide-by-zero)
     b = max(1, stats.get("channel_batches", 0))
+    # average channel means across all batches
     m = stats.get("channel_sum", torch.tensor([0.0,0.0,0.0])) / b
+    # average channel variances across all batches
     v = stats.get("channel_var_sum", torch.tensor([0.0,0.0,0.0])) / b
     print(
         f"[audit] global_min={stats.get('global_min')} global_max={stats.get('global_max')} total_pixels={stats.get('total_pixels')} out_of_range_pixels={stats.get('out_of_range_pixels')}"
