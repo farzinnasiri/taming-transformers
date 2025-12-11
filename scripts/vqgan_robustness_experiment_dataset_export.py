@@ -26,7 +26,7 @@ MODEL_PATH = "/checkpoints/vqgan_imagenet_f16_16384/last.ckpt"
 NOISE_STD_LOW = 0.1 
 NOISE_STD_MID = 0.2
 NOISE_STD_HIGH = 0.5
-MAX_SAMPLES = 150 # Set to None to run on all samples
+MAX_SAMPLES = None # Set to None to run on all samples
 BATCH_SIZE = 32
 
 STAMP = int(time.time())
