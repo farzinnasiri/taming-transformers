@@ -12,11 +12,10 @@ import torchvision.transforms as T
 import torchvision.transforms.functional as TF
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
+import multiprocessing as mp
 import sys
 sys.path.append('.')
-from taming.modules.losses.lpips import LPIPS
 from taming.models.vqgan import VQModel
-from skimage.metrics import structural_similarity as ssim
 
 CONFIG_PATH = "/checkpoints/vqgan_imagenet_f16_16384/model.yaml"
 MODEL_PATH = "/checkpoints/vqgan_imagenet_f16_16384/last.ckpt"
@@ -28,6 +27,7 @@ NOISE_STD_MID = 0.2
 NOISE_STD_HIGH = 0.5
 MAX_SAMPLES = None # Set to None to run on all samples
 BATCH_SIZE = 32
+NUM_SAVE_WORKERS = 8  # Workers for saving images and metadata
 
 STAMP = int(time.time())
 OUTDIR = f"{STAMP}_robustness_dataset_vqgan"
@@ -87,6 +87,63 @@ def batch_to_uint8_hwc(x):
     # detach().cpu().numpy() – the safe exit from PyTorch to NumPy -> .numpu() only works on a CPU tensor
     return y.detach().cpu().numpy()
 
+def save_worker(worker_id, queue, output_dir):
+    """
+    Worker process to save images and write metadata.
+    Reads tasks from queue and writes to its own metadata file.
+    """
+    images_dir = os.path.join(output_dir, "images")
+    metadata_path = os.path.join(output_dir, f"metadata_part_{worker_id}.jsonl")
+    
+    # Open unique metadata file for this worker
+    with open(metadata_path, "w") as f:
+        while True:
+            task = queue.get()
+            if task is None:
+                break
+            
+            try:
+                original_path = task['original_path']
+                
+                # Parse path to get class and filename
+                # /datasets/imagenet/val/n01440764/ILSVRC2012_val_00000293.JPEG
+                parts = original_path.split("/")
+                class_id = parts[-2]
+                filename = parts[-1].split(".")[0]
+                
+                # Create directory structure
+                # images/n01440764/ILSVRC2012_val_00000293/
+                sample_dir = os.path.join(images_dir, class_id, filename)
+                os.makedirs(sample_dir, exist_ok=True)
+                
+                # Save images
+                Image.fromarray(task['img_clean']).save(os.path.join(sample_dir, "0_original.png"))
+                Image.fromarray(task['rec_clean']).save(os.path.join(sample_dir, "1_recon_clean.png"))
+                
+                Image.fromarray(task['img_low']).save(os.path.join(sample_dir, "2_input_noise_low.png"))
+                Image.fromarray(task['rec_low']).save(os.path.join(sample_dir, "3_recon_noise_low.png"))
+                
+                Image.fromarray(task['img_mid']).save(os.path.join(sample_dir, "4_input_noise_mid.png"))
+                Image.fromarray(task['rec_mid']).save(os.path.join(sample_dir, "5_recon_noise_mid.png"))
+                
+                Image.fromarray(task['img_high']).save(os.path.join(sample_dir, "6_input_noise_high.png"))
+                Image.fromarray(task['rec_high']).save(os.path.join(sample_dir, "7_recon_noise_high.png"))
+                
+                # Write metadata
+                metadata = {
+                    "image_id": f"{class_id}/{filename}",
+                    "original_path": original_path,
+                    "indices_clean": task['indices_clean'],
+                    "indices_low": task['indices_low'],
+                    "indices_mid": task['indices_mid'],
+                    "indices_high": task['indices_high'],
+                    "noise_std": task['noise_std']
+                }
+                f.write(json.dumps(metadata) + "\n")
+                
+            except Exception as e:
+                print(f"Worker {worker_id} error processing {original_path}: {e}")
+
 class ImageNetValidationDataset(Dataset):
     def __init__(self, paths, size):
         self.paths = paths
@@ -105,27 +162,36 @@ class RobustnessDatasetGenerator:
         self.device = device
         self.output_dir = output_dir
         self.images_dir = os.path.join(output_dir, "images")
-        self.metadata_path = os.path.join(output_dir, "metadata.jsonl")
         
         os.makedirs(self.images_dir, exist_ok=True)
         
-        # Open metadata file in append mode
-        self.metadata_file = open(self.metadata_path, "w")
+        # Initialize Workers
+        self.queue = mp.Queue(maxsize=NUM_SAVE_WORKERS * 10) # Buffer size
+        self.workers = []
+        print(f"Starting {NUM_SAVE_WORKERS} save workers...")
+        for i in range(NUM_SAVE_WORKERS):
+            p = mp.Process(target=save_worker, args=(i, self.queue, output_dir))
+            p.start()
+            self.workers.append(p)
 
     def close(self):
-        self.metadata_file.close()
+        print("Waiting for workers to finish...")
+        for _ in self.workers:
+            self.queue.put(None)
+        for p in self.workers:
+            p.join()
 
     def process_batch(self, batch, paths):
         # batch: [B, 3, H, W] in [0, 1]
         x_clean = preprocess_vqgan(batch).to(self.device)
-        
-        # Generate noisy inputs
-        base_noise = torch.randn_like(x_clean)
-        x_low  = x_clean + base_noise * NOISE_STD_LOW
-        x_mid  = x_clean + base_noise * NOISE_STD_MID
-        x_high = x_clean + base_noise * NOISE_STD_HIGH
+        # x_clean is the clean image in model space, in range [-1,1]
 
-        
+        # Generate noisy inputs
+         # raw noise from standard normal distribution (mean 0, std 1), same shape as x_clean
+        base_noise = torch.randn_like(x_clean)
+
+        # three leves of noisy images from the same initial noise  
+        # we use a base_noise to ensure the noise direction is consistent across levels (same distribution, scaled at each level)     
         x_low  = torch.clamp(x_clean + base_noise * NOISE_STD_LOW,  -1.0, 1.0)
         x_mid  = torch.clamp(x_clean + base_noise * NOISE_STD_MID,  -1.0, 1.0)
         x_high = torch.clamp(x_clean + base_noise * NOISE_STD_HIGH, -1.0, 1.0)
@@ -135,18 +201,22 @@ class RobustnessDatasetGenerator:
         with torch.no_grad():
             # Clean
             quant_clean, _, (_, _, ind_clean) = self.model.encode(x_clean)
+            ind_clean = ind_clean.reshape(x_clean.shape[0], -1)
             rec_clean = self.model.decode(quant_clean)
             
             # Low
             quant_low, _, (_, _, ind_low) = self.model.encode(x_low)
+            ind_low = ind_low.reshape(x_low.shape[0], -1)
             rec_low = self.model.decode(quant_low)
             
             # Mid
             quant_mid, _, (_, _, ind_mid) = self.model.encode(x_mid)
+            ind_mid = ind_mid.reshape(x_mid.shape[0], -1)
             rec_mid = self.model.decode(quant_mid)
             
             # High
             quant_high, _, (_, _, ind_high) = self.model.encode(x_high)
+            ind_high = ind_high.reshape(x_high.shape[0], -1)
             rec_high = self.model.decode(quant_high)
 
         # Convert to uint8 for saving
@@ -162,59 +232,37 @@ class RobustnessDatasetGenerator:
         img_high_uint8 = batch_to_uint8_hwc(x_high)
         rec_high_uint8 = batch_to_uint8_hwc(rec_high)
 
-        # Iterate over batch to save files and write metadata
+        # Iterate over batch to enqueue tasks
         for i, original_path in enumerate(paths):
-            # Parse path to get class and filename
-            # /datasets/imagenet/val/n01440764/ILSVRC2012_val_00000293.JPEG
-            parts = original_path.split("/")
-            class_id = parts[-2]
-            filename = parts[-1].split(".")[0]
-            
-            # Create directory structure
-            # images/n01440764/ILSVRC2012_val_00000293/
-            sample_dir = os.path.join(self.images_dir, class_id, filename)
-            os.makedirs(sample_dir, exist_ok=True)
-            
-            # Save images
-            Image.fromarray(img_clean_uint8[i]).save(os.path.join(sample_dir, "0_original.png"))
-            Image.fromarray(rec_clean_uint8[i]).save(os.path.join(sample_dir, "1_recon_clean.png"))
-            
-            Image.fromarray(img_low_uint8[i]).save(os.path.join(sample_dir, "2_input_noise_low.png"))
-            Image.fromarray(rec_low_uint8[i]).save(os.path.join(sample_dir, "3_recon_noise_low.png"))
-            
-            Image.fromarray(img_mid_uint8[i]).save(os.path.join(sample_dir, "4_input_noise_mid.png"))
-            Image.fromarray(rec_mid_uint8[i]).save(os.path.join(sample_dir, "5_recon_noise_mid.png"))
-            
-            Image.fromarray(img_high_uint8[i]).save(os.path.join(sample_dir, "6_input_noise_high.png"))
-            Image.fromarray(rec_high_uint8[i]).save(os.path.join(sample_dir, "7_recon_noise_high.png"))
-            
-            # Write metadata
-            metadata = {
-                "image_id": f"{class_id}/{filename}",
-                "original_path": original_path,
-                "indices_clean": ind_clean[i].cpu().numpy().tolist(),
-                "indices_low": ind_low[i].cpu().numpy().tolist(),
-                "indices_mid": ind_mid[i].cpu().numpy().tolist(),
-                "indices_high": ind_high[i].cpu().numpy().tolist(),
-                "noise_std": [NOISE_STD_LOW, NOISE_STD_MID, NOISE_STD_HIGH]
+            task = {
+                'original_path': original_path,
+                'img_clean': img_clean_uint8[i],
+                'rec_clean': rec_clean_uint8[i],
+                'img_low': img_low_uint8[i],
+                'rec_low': rec_low_uint8[i],
+                'img_mid': img_mid_uint8[i],
+                'rec_mid': rec_mid_uint8[i],
+                'img_high': img_high_uint8[i],
+                'rec_high': rec_high_uint8[i],
+                'indices_clean': ind_clean[i].cpu().numpy().tolist(),
+                'indices_low': ind_low[i].cpu().numpy().tolist(),
+                'indices_mid': ind_mid[i].cpu().numpy().tolist(),
+                'indices_high': ind_high[i].cpu().numpy().tolist(),
+                'noise_std': [NOISE_STD_LOW, NOISE_STD_MID, NOISE_STD_HIGH]
             }
-            self.metadata_file.write(json.dumps(metadata) + "\n")
+            self.queue.put(task)
 
 def main():
     print(f"Starting Robustness Dataset Generation to {OUTDIR}")
     print(f"Noise Levels: Low={NOISE_STD_LOW}, Mid={NOISE_STD_MID}, High={NOISE_STD_HIGH}")
     
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Running on {device}")
     
     model = load_model(CONFIG_PATH, MODEL_PATH, device)
     
     paths, _ = gather_val_paths_and_labels(IMAGENET_VAL_ROOT)
     
-    # Shuffle paths to get a random distribution if we stop early
-    # But for reproducibility we might want to sort or seed. 
-    # Let's rely on MAX_SAMPLES and just take the first N (sorted by gather_val function usually)
-    # Actually, gather_val sorts them. So we get them in order.
     
     dataset = ImageNetValidationDataset(paths, SIZE)
     loader = DataLoader(
