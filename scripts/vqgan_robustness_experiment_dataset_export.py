@@ -30,7 +30,7 @@ MAX_SAMPLES = None # Set to None to run on all samples
 BATCH_SIZE = 32
 NUM_SAVE_WORKERS = 8  # Workers for saving images and metadata
 
-EXPERIMENT_MODE = "h1_patch_noise_encoder" # can be "global_noise", "h1_patch_noise_encoder", "h2_patch_token_edit_decoder"
+EXPERIMENT_MODE = "h2_patch_token_edit_decoder" # can be "global_noise", "h1_patch_noise_encoder", "h2_patch_token_edit_decoder"
 # Fraction of image area to be covered by the patch (0.25 = 25% area) - Used in H1 and H2 experiments
 PATCH_FRACTION = 0.25 
 # Strategy for patch placement: "random" (anywhere) or "center" (fixed center) - Used in H1 and H2 experiments
@@ -233,17 +233,17 @@ class RobustnessDatasetGenerator:
             x1 = x0 + side
             y1 = y0 + side
             return [(int(x0), int(y0), int(x1), int(y1)) for _ in range(batch_size)]
-
-        max_x0 = max(0, width - side)
-        max_y0 = max(0, height - side)
-        bboxes = []
-        for _ in range(batch_size):
-            x0 = random.randint(0, max_x0) if max_x0 > 0 else 0
-            y0 = random.randint(0, max_y0) if max_y0 > 0 else 0
-            x1 = x0 + side
-            y1 = y0 + side
-            bboxes.append((int(x0), int(y0), int(x1), int(y1)))
-        return bboxes
+        elif placement == "random":
+            max_x0 = max(0, width - side)
+            max_y0 = max(0, height - side)
+            bboxes = []
+            for _ in range(batch_size):
+                x0 = random.randint(0, max_x0) if max_x0 > 0 else 0
+                y0 = random.randint(0, max_y0) if max_y0 > 0 else 0
+                x1 = x0 + side
+                y1 = y0 + side
+                bboxes.append((int(x0), int(y0), int(x1), int(y1)))
+            return bboxes
 
     def make_mask_from_bboxes_px(self, bboxes, height, width, device):
         mask = torch.zeros((len(bboxes), 1, height, width), device=device)
