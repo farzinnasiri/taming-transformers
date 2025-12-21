@@ -30,9 +30,15 @@ MAX_SAMPLES = None # Set to None to run on all samples
 BATCH_SIZE = 32
 NUM_SAVE_WORKERS = 8  # Workers for saving images and metadata
 
-EXPERIMENT_MODE = "h2_patch_token_edit_decoder" # can be "global_noise", "h1_patch_noise_encoder", "h2_patch_token_edit_decoder"
-# Fraction of image area to be covered by the patch (0.25 = 25% area) - Used in H1 and H2 experiments
-PATCH_FRACTION = 0.25 
+EXPERIMENT_MODE = "h1_patch_noise_encoder" # can be "global_noise", "h1_patch_noise_encoder", "h2_patch_token_edit_decoder"
+# Patch size control.
+#
+# Preferred (token-aligned) control: set `PATCH_TOK_SIDE` as the side length in token space.
+# Example: PATCH_TOK_SIDE=8 means an 8×8 token square (64 tokens). On a 16×16 grid, that's 25%.
+PATCH_TOK_SIDE = 8
+# Legacy control (pixel-aligned sampling): fraction of image area to be covered by the patch (0.25 = 25% area)
+# Used by `sample_patch_bboxes_px` and currently by the H2 experiment.
+PATCH_FRACTION = 0.25
 # Strategy for patch placement: "random" (anywhere) or "center" (fixed center) - Used in H1 and H2 experiments
 PATCH_PLACEMENT = "random" 
 # Strategy for replacing tokens in H2 experiment: "random_uniform" (sample from codebook uniformly)
@@ -66,6 +72,9 @@ STAMP = int(time.time())
 OUTDIR = f"{STAMP}_robustness_dataset_vqgan_{EXPERIMENT_MODE}"
 SIZE = 256 # size to resize smallest side to, then center crop
 IMAGENET_VAL_ROOT = "/datasets/imagenet/val"
+
+EXPORT_CODEBOOK_NPY = True
+CODEBOOK_NPY_SAVE_PATH = os.path.join(OUTDIR, "codebook.npy")
 
 def load_model(config_path, ckpt_path, device):
     config = OmegaConf.load(config_path)
@@ -140,6 +149,15 @@ def indices_to_flat_and_grid(indices, batch_size):
     h, w = infer_square_grid_hw(ind_flat.shape[1])
     ind_grid = ind_flat.reshape(batch_size, h, w)
     return ind_flat, ind_grid
+
+
+def save_codebook_npy(model, path):
+    q = model.quantize
+    emb = getattr(q, "embedding", None)
+    if emb is None:
+        raise ValueError("Model quantizer has no `embedding` attribute")
+    w = emb.weight.detach().cpu().numpy()
+    np.save(path, w)
 
 
 def save_worker(worker_id, queue, output_dir):
@@ -245,11 +263,50 @@ class RobustnessDatasetGenerator:
                 bboxes.append((int(x0), int(y0), int(x1), int(y1)))
             return bboxes
 
+    def patch_side_from_fraction_tok(self, height_tok, width_tok, fraction):
+        side = int(round(math.sqrt(max(0.0, min(1.0, fraction))) * min(height_tok, width_tok)))
+        return max(1, min(side, height_tok, width_tok))
+
+    def sample_patch_bboxes_tok_square(self, batch_size, height_tok, width_tok, side_tok, placement):
+        side_tok = max(1, min(int(side_tok), height_tok, width_tok))
+        if placement == "center":
+            j0 = (width_tok - side_tok) // 2
+            i0 = (height_tok - side_tok) // 2
+            j1 = j0 + side_tok
+            i1 = i0 + side_tok
+            return [(int(j0), int(i0), int(j1), int(i1)) for _ in range(batch_size)]
+        if placement == "random":
+            max_j0 = max(0, width_tok - side_tok)
+            max_i0 = max(0, height_tok - side_tok)
+            bboxes = []
+            for _ in range(batch_size):
+                j0 = random.randint(0, max_j0) if max_j0 > 0 else 0
+                i0 = random.randint(0, max_i0) if max_i0 > 0 else 0
+                j1 = j0 + side_tok
+                i1 = i0 + side_tok
+                bboxes.append((int(j0), int(i0), int(j1), int(i1)))
+            return bboxes
+        raise ValueError(f"Unknown placement: {placement}")
+
     def make_mask_from_bboxes_px(self, bboxes, height, width, device):
         mask = torch.zeros((len(bboxes), 1, height, width), device=device)
         for i, (x0, y0, x1, y1) in enumerate(bboxes):
             mask[i, :, y0:y1, x0:x1] = 1.0
         return mask
+
+    def bbox_tok_to_bbox_px(self, bbox_tok, height_px, width_px, height_tok, width_tok):
+        if (width_px % width_tok) != 0 or (height_px % height_tok) != 0:
+            raise ValueError(
+                f"Pixel/token grids are not evenly divisible: px=({height_px},{width_px}) tok=({height_tok},{width_tok})"
+            )
+        stride_x = width_px // width_tok
+        stride_y = height_px // height_tok
+        j0, i0, j1, i1 = bbox_tok
+        x0 = j0 * stride_x
+        y0 = i0 * stride_y
+        x1 = j1 * stride_x
+        y1 = i1 * stride_y
+        return (int(x0), int(y0), int(x1), int(y1))
 
     def bbox_px_to_bbox_tok(self, bbox_px, height_px, width_px, height_tok, width_tok):
         """Map a pixel-space bounding box into a token-grid bounding box.
@@ -328,8 +385,14 @@ class RobustnessDatasetGenerator:
         Plain language: add Gaussian noise only inside a patch, then check whether token IDs outside the patch stay stable.
         """
         height_px, width_px = x_clean.shape[2], x_clean.shape[3]
-        bboxes_px = self.sample_patch_bboxes_px(batch_size, height_px, width_px, PATCH_FRACTION, PATCH_PLACEMENT)
-        bboxes_tok = [self.bbox_px_to_bbox_tok(b, height_px, width_px, height_tok, width_tok) for b in bboxes_px]
+
+        if PATCH_TOK_SIDE is None:
+            patch_side_tok = self.patch_side_from_fraction_tok(height_tok, width_tok, PATCH_FRACTION)
+        else:
+            patch_side_tok = max(1, min(int(PATCH_TOK_SIDE), height_tok, width_tok))
+
+        bboxes_tok = self.sample_patch_bboxes_tok_square(batch_size, height_tok, width_tok, patch_side_tok, PATCH_PLACEMENT)
+        bboxes_px = [self.bbox_tok_to_bbox_px(b, height_px, width_px, height_tok, width_tok) for b in bboxes_tok]
 
         # Generate random noise for the whole image
         base_noise = torch.randn_like(x_clean)
@@ -359,6 +422,8 @@ class RobustnessDatasetGenerator:
         rec_high_uint8 = batch_to_uint8_hwc(rec_high)
 
         for i, original_path in enumerate(paths):
+            x0, y0, x1, y1 = bboxes_px[i]
+            j0, i0, j1, i1 = bboxes_tok[i]
             images = [
                 {"filename": "0_original.png", "array": img_clean_uint8[i]},
                 {"filename": "1_recon_clean.png", "array": rec_clean_uint8[i]},
@@ -375,6 +440,10 @@ class RobustnessDatasetGenerator:
                 "token_grid_hw": [int(height_tok), int(width_tok)],
                 "patch_bbox_px": list(map(int, bboxes_px[i])),
                 "patch_bbox_tok": list(map(int, bboxes_tok[i])),
+                "patch_side_tok": int(patch_side_tok),
+                "patch_top_left_tok": [int(j0), int(i0)],
+                "patch_side_px": [int(x1 - x0), int(y1 - y0)],
+                "patch_top_left_px": [int(x0), int(y0)],
                 "indices_clean": ind_clean_flat[i].detach().cpu().numpy().tolist(),
                 "indices_low": ind_low_flat[i].detach().cpu().numpy().tolist(),
                 "indices_mid": ind_mid_flat[i].detach().cpu().numpy().tolist(),
@@ -402,11 +471,11 @@ class RobustnessDatasetGenerator:
 
         if TOKEN_EDIT_MODE != "random_uniform":
             raise ValueError(f"Unknown TOKEN_EDIT_MODE: {TOKEN_EDIT_MODE}")
-        n_e = getattr(self.model.quantize, "n_e", None)
-        if n_e is None:
-            raise ValueError("Could not infer codebook size from model.quantize.n_e")
 
-        for i, (j0, i0, j1, i1) in enumerate(bboxes_tok):
+        # n_e is the codebook size
+        n_e = getattr(self.model.quantize, "n_e", None)
+
+        for i, (j0, i0, j1, i1) in enumerate[tuple[int, int, int, int]](bboxes_tok):
             rand_patch = torch.randint(
                 low=0,
                 high=int(n_e),
@@ -501,8 +570,13 @@ def main():
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Running on {device}")
+
+    os.makedirs(OUTDIR, exist_ok=True)
     
     model = load_model(CONFIG_PATH, MODEL_PATH, device)
+
+    if EXPORT_CODEBOOK_NPY:
+        save_codebook_npy(model, CODEBOOK_NPY_SAVE_PATH)
     
     paths, _ = gather_val_paths_and_labels(IMAGENET_VAL_ROOT)
     
