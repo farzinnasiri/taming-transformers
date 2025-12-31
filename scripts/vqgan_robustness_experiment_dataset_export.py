@@ -24,8 +24,9 @@ MODEL_PATH = "/checkpoints/vqgan_imagenet_f16_16384/last.ckpt"
 # Noise values are specified in VQGAN's internal pixel space (i.e., after `preprocess_vqgan`, so values live in [-1, 1]).
 # Example: std=0.1 in [-1,1] corresponds to ~0.05 in [0,1].
 NOISE_STD_LOW = 0.1 
-NOISE_STD_MID = 0.2
+NOISE_STD_MID = 0.25
 NOISE_STD_HIGH = 0.5
+NOISE_STD_XHIGH = 1.0
 MAX_SAMPLES = None # Set to None to run on all samples
 BATCH_SIZE = 32
 NUM_SAVE_WORKERS = 8  # Workers for saving images and metadata
@@ -43,6 +44,7 @@ PATCH_FRACTION = 0.25
 PATCH_PLACEMENT = "random" 
 # Strategy for replacing tokens in H2 experiment: "random_uniform" (sample from codebook uniformly)
 TOKEN_EDIT_MODE = "random_uniform"
+USE_BLACK_MASK_H1 = True # If True, adds a black-mask experiment (occlusion) to H1
 SEED = 0
 
 # Experiment definitions:
@@ -334,15 +336,18 @@ class RobustnessDatasetGenerator:
         x_low = torch.clamp(x_clean + base_noise * NOISE_STD_LOW, -1.0, 1.0)
         x_mid = torch.clamp(x_clean + base_noise * NOISE_STD_MID, -1.0, 1.0)
         x_high = torch.clamp(x_clean + base_noise * NOISE_STD_HIGH, -1.0, 1.0)
+        x_xhigh = torch.clamp(x_clean + base_noise * NOISE_STD_XHIGH, -1.0, 1.0)
 
         with torch.no_grad():
             rec_low, ind_low_raw = self.encode_decode(x_low)
             rec_mid, ind_mid_raw = self.encode_decode(x_mid)
             rec_high, ind_high_raw = self.encode_decode(x_high)
+            rec_xhigh, ind_xhigh_raw = self.encode_decode(x_xhigh)
 
         ind_low_flat, _ = indices_to_flat_and_grid(ind_low_raw, batch_size)
         ind_mid_flat, _ = indices_to_flat_and_grid(ind_mid_raw, batch_size)
         ind_high_flat, _ = indices_to_flat_and_grid(ind_high_raw, batch_size)
+        ind_xhigh_flat, _ = indices_to_flat_and_grid(ind_xhigh_raw, batch_size)
 
         img_low_uint8 = batch_to_uint8_hwc(x_low)
         rec_low_uint8 = batch_to_uint8_hwc(rec_low)
@@ -350,6 +355,14 @@ class RobustnessDatasetGenerator:
         rec_mid_uint8 = batch_to_uint8_hwc(rec_mid)
         img_high_uint8 = batch_to_uint8_hwc(x_high)
         rec_high_uint8 = batch_to_uint8_hwc(rec_high)
+        img_xhigh_uint8 = batch_to_uint8_hwc(x_xhigh)
+        rec_xhigh_uint8 = batch_to_uint8_hwc(rec_xhigh)
+
+        ind_clean_cpu = ind_clean_flat.detach().cpu().numpy()
+        ind_low_cpu = ind_low_flat.detach().cpu().numpy()
+        ind_mid_cpu = ind_mid_flat.detach().cpu().numpy()
+        ind_high_cpu = ind_high_flat.detach().cpu().numpy()
+        ind_xhigh_cpu = ind_xhigh_flat.detach().cpu().numpy()
 
         for i, original_path in enumerate(paths):
             images = [
@@ -361,15 +374,18 @@ class RobustnessDatasetGenerator:
                 {"filename": "5_recon_noise_mid.png", "array": rec_mid_uint8[i]},
                 {"filename": "6_input_noise_high.png", "array": img_high_uint8[i]},
                 {"filename": "7_recon_noise_high.png", "array": rec_high_uint8[i]},
+                {"filename": "8_input_noise_xhigh.png", "array": img_xhigh_uint8[i]},
+                {"filename": "9_recon_noise_xhigh.png", "array": rec_xhigh_uint8[i]},
             ]
             metadata = {
                 "experiment_mode": EXPERIMENT_MODE,
-                "noise_std": [NOISE_STD_LOW, NOISE_STD_MID, NOISE_STD_HIGH],
+                "noise_std": [NOISE_STD_LOW, NOISE_STD_MID, NOISE_STD_HIGH, NOISE_STD_XHIGH],
                 "token_grid_hw": [int(height_tok), int(width_tok)],
-                "indices_clean": ind_clean_flat[i].detach().cpu().numpy().tolist(),
-                "indices_low": ind_low_flat[i].detach().cpu().numpy().tolist(),
-                "indices_mid": ind_mid_flat[i].detach().cpu().numpy().tolist(),
-                "indices_high": ind_high_flat[i].detach().cpu().numpy().tolist(),
+                "indices_clean": ind_clean_cpu[i].tolist(),
+                "indices_low": ind_low_cpu[i].tolist(),
+                "indices_mid": ind_mid_cpu[i].tolist(),
+                "indices_high": ind_high_cpu[i].tolist(),
+                "indices_xhigh": ind_xhigh_cpu[i].tolist(),
             }
             task = {"original_path": original_path, "images": images, "metadata": metadata}
             self.queue.put(task)
@@ -404,15 +420,25 @@ class RobustnessDatasetGenerator:
         x_low = torch.clamp(x_clean + base_noise * NOISE_STD_LOW * mask_px, -1.0, 1.0)
         x_mid = torch.clamp(x_clean + base_noise * NOISE_STD_MID * mask_px, -1.0, 1.0)
         x_high = torch.clamp(x_clean + base_noise * NOISE_STD_HIGH * mask_px, -1.0, 1.0)
+        x_xhigh = torch.clamp(x_clean + base_noise * NOISE_STD_XHIGH * mask_px, -1.0, 1.0)
 
         with torch.no_grad():
             rec_low, ind_low_raw = self.encode_decode(x_low)
             rec_mid, ind_mid_raw = self.encode_decode(x_mid)
             rec_high, ind_high_raw = self.encode_decode(x_high)
+            rec_xhigh, ind_xhigh_raw = self.encode_decode(x_xhigh)
+            
+            if USE_BLACK_MASK_H1:
+                # Black mask (occlusion): set patch region to -1.0 (black in VQGAN space)
+                x_masked = x_clean * (1.0 - mask_px) + (-1.0 * mask_px)
+                rec_masked, ind_masked_raw = self.encode_decode(x_masked)
 
         ind_low_flat, _ = indices_to_flat_and_grid(ind_low_raw, batch_size)
         ind_mid_flat, _ = indices_to_flat_and_grid(ind_mid_raw, batch_size)
         ind_high_flat, _ = indices_to_flat_and_grid(ind_high_raw, batch_size)
+        ind_xhigh_flat, _ = indices_to_flat_and_grid(ind_xhigh_raw, batch_size)
+        if USE_BLACK_MASK_H1:
+            ind_masked_flat, _ = indices_to_flat_and_grid(ind_masked_raw, batch_size)
 
         img_low_uint8 = batch_to_uint8_hwc(x_low)
         rec_low_uint8 = batch_to_uint8_hwc(rec_low)
@@ -420,6 +446,19 @@ class RobustnessDatasetGenerator:
         rec_mid_uint8 = batch_to_uint8_hwc(rec_mid)
         img_high_uint8 = batch_to_uint8_hwc(x_high)
         rec_high_uint8 = batch_to_uint8_hwc(rec_high)
+        img_xhigh_uint8 = batch_to_uint8_hwc(x_xhigh)
+        rec_xhigh_uint8 = batch_to_uint8_hwc(rec_xhigh)
+        if USE_BLACK_MASK_H1:
+            img_masked_uint8 = batch_to_uint8_hwc(x_masked)
+            rec_masked_uint8 = batch_to_uint8_hwc(rec_masked)
+
+        ind_clean_cpu = ind_clean_flat.detach().cpu().numpy()
+        ind_low_cpu = ind_low_flat.detach().cpu().numpy()
+        ind_mid_cpu = ind_mid_flat.detach().cpu().numpy()
+        ind_high_cpu = ind_high_flat.detach().cpu().numpy()
+        ind_xhigh_cpu = ind_xhigh_flat.detach().cpu().numpy()
+        if USE_BLACK_MASK_H1:
+            ind_masked_cpu = ind_masked_flat.detach().cpu().numpy()
 
         for i, original_path in enumerate(paths):
             x0, y0, x1, y1 = bboxes_px[i]
@@ -433,10 +472,18 @@ class RobustnessDatasetGenerator:
                 {"filename": "5_recon_patch_noise_mid.png", "array": rec_mid_uint8[i]},
                 {"filename": "6_input_patch_noise_high.png", "array": img_high_uint8[i]},
                 {"filename": "7_recon_patch_noise_high.png", "array": rec_high_uint8[i]},
+                {"filename": "8_input_patch_noise_xhigh.png", "array": img_xhigh_uint8[i]},
+                {"filename": "9_recon_patch_noise_xhigh.png", "array": rec_xhigh_uint8[i]},
             ]
+            if USE_BLACK_MASK_H1:
+                images.extend([
+                    {"filename": "10_input_patch_masked.png", "array": img_masked_uint8[i]},
+                    {"filename": "11_recon_patch_masked.png", "array": rec_masked_uint8[i]},
+                ])
+
             metadata = {
                 "experiment_mode": EXPERIMENT_MODE,
-                "noise_std": [NOISE_STD_LOW, NOISE_STD_MID, NOISE_STD_HIGH],
+                "noise_std": [NOISE_STD_LOW, NOISE_STD_MID, NOISE_STD_HIGH, NOISE_STD_XHIGH],
                 "token_grid_hw": [int(height_tok), int(width_tok)],
                 "patch_bbox_px": list(map(int, bboxes_px[i])),
                 "patch_bbox_tok": list(map(int, bboxes_tok[i])),
@@ -444,11 +491,15 @@ class RobustnessDatasetGenerator:
                 "patch_top_left_tok": [int(j0), int(i0)],
                 "patch_side_px": [int(x1 - x0), int(y1 - y0)],
                 "patch_top_left_px": [int(x0), int(y0)],
-                "indices_clean": ind_clean_flat[i].detach().cpu().numpy().tolist(),
-                "indices_low": ind_low_flat[i].detach().cpu().numpy().tolist(),
-                "indices_mid": ind_mid_flat[i].detach().cpu().numpy().tolist(),
-                "indices_high": ind_high_flat[i].detach().cpu().numpy().tolist(),
+                "indices_clean": ind_clean_cpu[i].tolist(),
+                "indices_low": ind_low_cpu[i].tolist(),
+                "indices_mid": ind_mid_cpu[i].tolist(),
+                "indices_high": ind_high_cpu[i].tolist(),
+                "indices_xhigh": ind_xhigh_cpu[i].tolist(),
             }
+            if USE_BLACK_MASK_H1:
+                metadata["indices_masked"] = ind_masked_cpu[i].tolist()
+                metadata["has_masked_occlusion"] = True
             task = {"original_path": original_path, "images": images, "metadata": metadata}
             self.queue.put(task)
 
@@ -464,8 +515,14 @@ class RobustnessDatasetGenerator:
         Plain language: change a small contiguous block of token IDs, decode, and see if effects stay local.
         """
         height_px, width_px = x_clean.shape[2], x_clean.shape[3]
-        bboxes_px = self.sample_patch_bboxes_px(batch_size, height_px, width_px, PATCH_FRACTION, PATCH_PLACEMENT)
-        bboxes_tok = [self.bbox_px_to_bbox_tok(b, height_px, width_px, height_tok, width_tok) for b in bboxes_px]
+
+        if PATCH_TOK_SIDE is None:
+            patch_side_tok = self.patch_side_from_fraction_tok(height_tok, width_tok, PATCH_FRACTION)
+        else:
+            patch_side_tok = max(1, min(int(PATCH_TOK_SIDE), height_tok, width_tok))
+
+        bboxes_tok = self.sample_patch_bboxes_tok_square(batch_size, height_tok, width_tok, patch_side_tok, PATCH_PLACEMENT)
+        bboxes_px = [self.bbox_tok_to_bbox_px(b, height_px, width_px, height_tok, width_tok) for b in bboxes_tok]
         
         ind_edit_grid = ind_clean_grid.clone()
 
@@ -475,7 +532,7 @@ class RobustnessDatasetGenerator:
         # n_e is the codebook size
         n_e = getattr(self.model.quantize, "n_e", None)
 
-        for i, (j0, i0, j1, i1) in enumerate[tuple[int, int, int, int]](bboxes_tok):
+        for i, (j0, i0, j1, i1) in enumerate(bboxes_tok):
             rand_patch = torch.randint(
                 low=0,
                 high=int(n_e),
@@ -489,6 +546,9 @@ class RobustnessDatasetGenerator:
             rec_edit = self.decode_from_indices_flat(ind_edit_flat, height_tok, width_tok)
         rec_edit_uint8 = batch_to_uint8_hwc(rec_edit)
 
+        ind_clean_cpu = ind_clean_flat.detach().cpu().numpy()
+        ind_edit_cpu = ind_edit_flat.detach().cpu().numpy()
+
         for i, original_path in enumerate(paths):
             images = [
                 {"filename": "0_original.png", "array": img_clean_uint8[i]},
@@ -501,8 +561,8 @@ class RobustnessDatasetGenerator:
                 "token_grid_hw": [int(height_tok), int(width_tok)],
                 "patch_bbox_px": list(map(int, bboxes_px[i])),
                 "patch_bbox_tok": list(map(int, bboxes_tok[i])),
-                "indices_clean": ind_clean_flat[i].detach().cpu().numpy().tolist(),
-                "indices_edit": ind_edit_flat[i].detach().cpu().numpy().tolist(),
+                "indices_clean": ind_clean_cpu[i].tolist(),
+                "indices_edit": ind_edit_cpu[i].tolist(),
             }
             task = {"original_path": original_path, "images": images, "metadata": metadata}
             self.queue.put(task)
@@ -565,7 +625,9 @@ def main():
 
     print(f"Starting Robustness Dataset Generation to {OUTDIR}")
     print(f"Experiment Mode: {EXPERIMENT_MODE}")
-    print(f"Noise Levels: Low={NOISE_STD_LOW}, Mid={NOISE_STD_MID}, High={NOISE_STD_HIGH}")
+    print(f"Noise Levels: Low={NOISE_STD_LOW}, Mid={NOISE_STD_MID}, High={NOISE_STD_HIGH}, XHigh={NOISE_STD_XHIGH}")
+    if EXPERIMENT_MODE == "h1_patch_noise_encoder":
+        print(f"H1 Black Mask (Occlusion): {USE_BLACK_MASK_H1}")
     print(f"Patch Fraction: {PATCH_FRACTION}, Patch Placement: {PATCH_PLACEMENT}")
 
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")

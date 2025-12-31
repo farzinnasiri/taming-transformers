@@ -1,0 +1,7 @@
+# Docker run options
+docker_args: -v /home/nasiri/storage/vq-gan/checkpoints:/checkpoints -v /home/nasiri/datasets/shared/imagenet:/datasets/imagenet -p 7677:8888
+# Specify the name of the container
+container_name: {user}_vqgan_GPU{args.gpu}_{date}
+
+# Specify the Docker image to use
+image_name: nasiri/taming:latest
