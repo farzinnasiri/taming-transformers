@@ -136,7 +136,7 @@ def load_model(config_path: str, ckpt_path: str, device: torch.device) -> VQMode
 def compute_maps(
     codebook: torch.Tensor,
     alive_token_ids: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     if alive_token_ids.ndim != 1:
         raise ValueError("alive_token_ids must be a 1D array")
 
@@ -153,37 +153,60 @@ def compute_maps(
     alive_t = torch.from_numpy(alive_token_ids).to(device=device, dtype=torch.long)
     e = codebook.index_select(0, alive_t)
 
+    # 1. Compute Euclidean Distance (L2) for Closest/Farthest.
+    # We use L2 distance to match the VQGAN quantizer's assignment logic
+    # (see taming/modules/vqvae/quantize.py: VectorQuantizer.forward)
     norms = (e * e).sum(dim=1, keepdim=True)
     dist2 = norms + norms.transpose(0, 1) - 2.0 * (e @ e.transpose(0, 1))
     dist2 = dist2.clamp_min_(0.0)
 
     dist2_min = dist2.clone()
     dist2_min.fill_diagonal_(float("inf"))
-    min_j = dist2_min.argmin(dim=1)
+    min_res = dist2_min.min(dim=1)
+    min_j = min_res.indices
+    min_v = torch.sqrt(min_res.values)
 
     dist2_max = dist2.clone()
     dist2_max.fill_diagonal_(-float("inf"))
-    max_j = dist2_max.argmax(dim=1)
+    max_res = dist2_max.max(dim=1)
+    max_j = max_res.indices
+    max_v = torch.sqrt(max_res.values)
 
+    # 2. Compute Cosine Similarity for Orthogonality.
+    # Orthogonality is defined by the dot product (or cosine similarity) being zero.
+    # We find the token that minimizes abs(cosine_similarity).
     eps = 1e-12
     e_norm = e / (e.norm(dim=1, keepdim=True) + eps)
     cos = e_norm @ e_norm.transpose(0, 1)
     abs_cos = cos.abs()
     abs_cos.fill_diagonal_(float("inf"))
     ortho_j = abs_cos.argmin(dim=1)
+    ortho_v = cos.gather(1, ortho_j.unsqueeze(1)).squeeze(1)
 
     alive_np = alive_token_ids.astype(np.int32)
     min_j_np = min_j.detach().cpu().numpy().astype(np.int64)
     max_j_np = max_j.detach().cpu().numpy().astype(np.int64)
     ortho_j_np = ortho_j.detach().cpu().numpy().astype(np.int64)
 
+    min_v_np = min_v.detach().cpu().numpy().astype(np.float32)
+    max_v_np = max_v.detach().cpu().numpy().astype(np.float32)
+    ortho_v_np = ortho_v.detach().cpu().numpy().astype(np.float32)
+
     min_dist_idx = np.full((n_embed,), -1, dtype=np.int32)
     max_dist_idx = np.full((n_embed,), -1, dtype=np.int32)
     ortho_idx = np.full((n_embed,), -1, dtype=np.int32)
 
+    min_dist_val = np.full((n_embed,), np.nan, dtype=np.float32)
+    max_dist_val = np.full((n_embed,), np.nan, dtype=np.float32)
+    ortho_cos_val = np.full((n_embed,), np.nan, dtype=np.float32)
+
     min_dist_idx[alive_np] = alive_np[min_j_np]
     max_dist_idx[alive_np] = alive_np[max_j_np]
     ortho_idx[alive_np] = alive_np[ortho_j_np]
+
+    min_dist_val[alive_np] = min_v_np
+    max_dist_val[alive_np] = max_v_np
+    ortho_cos_val[alive_np] = ortho_v_np
 
     if np.any(min_dist_idx[alive_np] == alive_np):
         raise RuntimeError("min_dist_idx contains self-maps")
@@ -192,7 +215,14 @@ def compute_maps(
     if np.any(ortho_idx[alive_np] == alive_np):
         raise RuntimeError("ortho_idx contains self-maps")
 
-    return min_dist_idx, max_dist_idx, ortho_idx
+    return (
+        min_dist_idx,
+        max_dist_idx,
+        ortho_idx,
+        min_dist_val,
+        max_dist_val,
+        ortho_cos_val,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -226,7 +256,14 @@ def main() -> None:
     model = load_model(args.config, args.ckpt, device)
     codebook = model.quantize.embedding.weight.detach()
 
-    min_dist_idx, max_dist_idx, ortho_idx = compute_maps(codebook, ALIVE_TOKEN_IDS)
+    (
+        min_dist_idx,
+        max_dist_idx,
+        ortho_idx,
+        min_dist_val,
+        max_dist_val,
+        ortho_cos_val,
+    ) = compute_maps(codebook, ALIVE_TOKEN_IDS)
 
     out_path = args.out
     out_dir = os.path.dirname(out_path)
@@ -239,6 +276,9 @@ def main() -> None:
         min_dist_idx=min_dist_idx,
         max_dist_idx=max_dist_idx,
         ortho_idx=ortho_idx,
+        min_dist_val=min_dist_val,
+        max_dist_val=max_dist_val,
+        ortho_cos_val=ortho_cos_val,
         n_embed=np.int32(codebook.shape[0]),
         embed_dim=np.int32(codebook.shape[1]),
     )
