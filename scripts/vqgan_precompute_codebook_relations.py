@@ -1,6 +1,8 @@
+from __future__ import annotations
 import argparse
 import os
 import sys
+from typing import Tuple
 
 import numpy as np
 import torch
@@ -134,7 +136,7 @@ def load_model(config_path: str, ckpt_path: str, device: torch.device) -> VQMode
 def compute_maps(
     codebook: torch.Tensor,
     alive_token_ids: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     if alive_token_ids.ndim != 1:
         raise ValueError("alive_token_ids must be a 1D array")
 
