@@ -17,6 +17,18 @@ import sys
 sys.path.append('.')
 from taming.models.vqgan import VQModel
 
+def get_env(name, default):
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    if isinstance(default, bool):
+        return val.lower() in ("true", "1", "yes")
+    if isinstance(default, int):
+        return int(val)
+    if isinstance(default, float):
+        return float(val)
+    return val
+
 CONFIG_PATH = "/checkpoints/vqgan_imagenet_f16_16384/model.yaml"
 MODEL_PATH = "/checkpoints/vqgan_imagenet_f16_16384/last.ckpt"
 
@@ -29,15 +41,15 @@ NOISE_STD_HIGH = 0.5
 NOISE_STD_XHIGH = 1.0
 MAX_SAMPLES = None # Set to None to run on all samples
 BATCH_SIZE = 32
-NUM_SAVE_WORKERS = 8  # Workers for saving images and metadata
+NUM_SAVE_WORKERS = 16  # Workers for saving images and metadata
 
-EXPERIMENT_MODE = "h1_patch_noise_encoder" # can be "global_noise", "h1_patch_noise_encoder", "h2_patch_token_edit_decoder"
+EXPERIMENT_MODE = get_env("EXPERIMENT_MODE", "h1_patch_noise_encoder") # can be "global_noise", "h1_patch_noise_encoder", "h2_patch_token_edit_decoder"
 # Patch size control.
 #
 # Preferred (token-aligned) control: set `PATCH_TOK_SIDE` as the side length in token space.
 # Example: PATCH_TOK_SIDE=8 means an 8×8 token square (64 tokens). On a 16×16 grid, that's 25%.
 PATCH_TOK_SIDE = 8
-# Legacy control (pixel-aligned sampling): fraction of image area to be covered by the patch (0.25 = 25% area)
+# Legacy control - deprecated (pixel-aligned sampling): fraction of image area to be covered by the patch (0.25 = 25% area)
 # Used by `sample_patch_bboxes_px` and currently by the H2 experiment.
 PATCH_FRACTION = 0.25
 # Strategy for patch placement: "random" (anywhere) or "center" (fixed center) - Used in H1 and H2 experiments
@@ -71,7 +83,7 @@ SEED = 0
 
 
 STAMP = int(time.time())
-OUTDIR = f"{STAMP}_robustness_dataset_vqgan_{EXPERIMENT_MODE}"
+OUTDIR = f"{STAMP}_robustness_dataset_vqgan_{EXPERIMENT_MODE}_patch{PATCH_TOK_SIDE}_seed{SEED}"
 SIZE = 256 # size to resize smallest side to, then center crop
 IMAGENET_VAL_ROOT = "/datasets/imagenet/val"
 
