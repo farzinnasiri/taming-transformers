@@ -75,7 +75,7 @@ OUTDIR = f"{STAMP}_robustness_dataset_vqgan_{EXPERIMENT_MODE}"
 SIZE = 256 # size to resize smallest side to, then center crop
 IMAGENET_VAL_ROOT = "/datasets/imagenet/val"
 
-EXPORT_CODEBOOK_NPY = True
+EXPORT_CODEBOOK_NPY = False
 CODEBOOK_NPY_SAVE_PATH = os.path.join(OUTDIR, "codebook.npy")
 
 def load_model(config_path, ckpt_path, device):
