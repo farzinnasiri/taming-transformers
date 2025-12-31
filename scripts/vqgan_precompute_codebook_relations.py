@@ -291,3 +291,13 @@ def main() -> None:
 if __name__ == "__main__":
     main()
 
+
+# run via:
+# docker run --rm -it \
+#   --gpus "device=3" \
+#   --shm-size=24g \
+#   -v $(pwd):/app \
+#   -v /home/nasiri/storage/vq-gan/checkpoints:/checkpoints \
+#   -w /app \
+#   nasiri/taming:latest \
+#   python3 scripts/vqgan_precompute_codebook_relations.py

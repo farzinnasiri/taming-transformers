@@ -31,6 +31,7 @@ def get_env(name, default):
 
 CONFIG_PATH = "/checkpoints/vqgan_imagenet_f16_16384/model.yaml"
 MODEL_PATH = "/checkpoints/vqgan_imagenet_f16_16384/last.ckpt"
+CODEBOOK_RELATIONS_NPZ_PATH = "vqgan_codebook_relations.npz"
 
 # Robustness Configuration
 # Noise values are specified in VQGAN's internal pixel space (i.e., after `preprocess_vqgan`, so values live in [-1, 1]).
@@ -41,6 +42,7 @@ NOISE_STD_HIGH = 0.5
 NOISE_STD_XHIGH = 1.0
 MAX_SAMPLES = None # Set to None to run on all samples
 BATCH_SIZE = 32
+H2_DECODE_MAX_BATCH = get_env("H2_DECODE_MAX_BATCH", BATCH_SIZE)
 NUM_SAVE_WORKERS = 16  # Workers for saving images and metadata
 
 EXPERIMENT_MODE = get_env("EXPERIMENT_MODE", "h1_patch_noise_encoder") # can be "global_noise", "h1_patch_noise_encoder", "h2_patch_token_edit_decoder"
@@ -54,8 +56,8 @@ PATCH_TOK_SIDE = 8
 PATCH_FRACTION = 0.25
 # Strategy for patch placement: "random" (anywhere) or "center" (fixed center) - Used in H1 and H2 experiments
 PATCH_PLACEMENT = "random" 
-# Strategy for replacing tokens in H2 experiment: "random_uniform" (sample from codebook uniformly)
-TOKEN_EDIT_MODE = "random_uniform"
+# Strategy for replacing tokens in H2 experiment.
+TOKEN_EDIT_MODES = ["random_uniform", "closest", "farthest", "orthogonal"]
 USE_BLACK_MASK_H1 = True # If True, adds a black-mask experiment (occlusion) to H1
 SEED = 0
 
@@ -234,6 +236,7 @@ class RobustnessDatasetGenerator:
         self.device = device
         self.output_dir = output_dir
         self.images_dir = os.path.join(output_dir, "images")
+        self._codebook_relations = None
         
         os.makedirs(self.images_dir, exist_ok=True)
         
@@ -252,6 +255,32 @@ class RobustnessDatasetGenerator:
             self.queue.put(None)
         for p in self.workers:
             p.join()
+
+    def _get_codebook_relations(self):
+        if self._codebook_relations is not None:
+            return self._codebook_relations
+
+        if not os.path.exists(CODEBOOK_RELATIONS_NPZ_PATH):
+            raise FileNotFoundError(
+                f"Missing codebook relations NPZ: {CODEBOOK_RELATIONS_NPZ_PATH}. "
+                "Expected it in the repository root (cwd)."
+            )
+
+        rel = np.load(CODEBOOK_RELATIONS_NPZ_PATH)
+        required = ["min_dist_idx", "max_dist_idx", "ortho_idx"]
+        missing = [k for k in required if k not in rel]
+        if missing:
+            raise KeyError(
+                f"Codebook relations NPZ is missing keys: {missing}. "
+                f"Path: {CODEBOOK_RELATIONS_NPZ_PATH}"
+            )
+
+        self._codebook_relations = {
+            "min_dist_idx": torch.from_numpy(rel["min_dist_idx"]).to(self.device),
+            "max_dist_idx": torch.from_numpy(rel["max_dist_idx"]).to(self.device),
+            "ortho_idx": torch.from_numpy(rel["ortho_idx"]).to(self.device),
+        }
+        return self._codebook_relations
 
     def patch_side_from_fraction(self, height, width, fraction):
         side = int(round(math.sqrt(max(0.0, min(1.0, fraction))) * min(height, width)))
@@ -536,46 +565,97 @@ class RobustnessDatasetGenerator:
         bboxes_tok = self.sample_patch_bboxes_tok_square(batch_size, height_tok, width_tok, patch_side_tok, PATCH_PLACEMENT)
         bboxes_px = [self.bbox_tok_to_bbox_px(b, height_px, width_px, height_tok, width_tok) for b in bboxes_tok]
         
-        ind_edit_grid = ind_clean_grid.clone()
+        if not isinstance(TOKEN_EDIT_MODES, (list, tuple)):
+            raise ValueError("TOKEN_EDIT_MODES must be a list or tuple")
 
-        if TOKEN_EDIT_MODE != "random_uniform":
-            raise ValueError(f"Unknown TOKEN_EDIT_MODE: {TOKEN_EDIT_MODE}")
+        token_edit_modes = [str(m) for m in TOKEN_EDIT_MODES]
+        if len(set(token_edit_modes)) != len(token_edit_modes):
+            raise ValueError("TOKEN_EDIT_MODES contains duplicates")
 
-        # n_e is the codebook size
-        n_e = getattr(self.model.quantize, "n_e", None)
+        valid_modes = {"random_uniform", "closest", "farthest", "orthogonal"}
+        bad_modes = [m for m in token_edit_modes if m not in valid_modes]
+        if bad_modes:
+            raise ValueError(f"Unknown TOKEN_EDIT_MODES entries: {bad_modes}")
 
-        for i, (j0, i0, j1, i1) in enumerate(bboxes_tok):
-            rand_patch = torch.randint(
-                low=0,
-                high=int(n_e),
-                size=(i1 - i0, j1 - j0),
-                device=ind_edit_grid.device,
-            )
-            ind_edit_grid[i, i0:i1, j0:j1] = rand_patch
+        relations = None
+        if any(m in {"closest", "farthest", "orthogonal"} for m in token_edit_modes):
+            relations = self._get_codebook_relations()
 
-        ind_edit_flat = ind_edit_grid.reshape(batch_size, -1)
+        ind_edits_flat = []
+        ind_edits_cpu = {}
+
+        for mode in token_edit_modes:
+            ind_edit_grid = ind_clean_grid.clone()
+            for bi, (j0, i0, j1, i1) in enumerate(bboxes_tok):
+                if mode == "random_uniform":
+                    n_e = getattr(self.model.quantize, "n_e", None)
+                    rand_patch = torch.randint(
+                        low=0,
+                        high=int(n_e),
+                        size=(i1 - i0, j1 - j0),
+                        device=ind_edit_grid.device,
+                    )
+                    ind_edit_grid[bi, i0:i1, j0:j1] = rand_patch
+                else:
+                    if mode == "closest":
+                        map_key = "min_dist_idx"
+                    elif mode == "farthest":
+                        map_key = "max_dist_idx"
+                    else:
+                        map_key = "ortho_idx"
+
+                    patch = ind_edit_grid[bi, i0:i1, j0:j1]
+                    mapped = relations[map_key][patch]
+                    if (mapped < 0).any():
+                        raise RuntimeError(
+                            "Codebook relations mapping produced invalid indices (<0). "
+                            "This usually means the NPZ was built for a different codebook or includes non-alive tokens."
+                        )
+                    ind_edit_grid[bi, i0:i1, j0:j1] = mapped
+
+            ind_edit_flat = ind_edit_grid.reshape(batch_size, -1)
+            ind_edits_flat.append(ind_edit_flat)
+            ind_edits_cpu[mode] = ind_edit_flat.detach().cpu().numpy()
+
+        ind_all = torch.cat(ind_edits_flat, dim=0)
+        max_decode_batch = int(H2_DECODE_MAX_BATCH)
+        if max_decode_batch <= 0:
+            raise ValueError("H2_DECODE_MAX_BATCH must be > 0")
+
+        rec_chunks = []
         with torch.no_grad():
-            rec_edit = self.decode_from_indices_flat(ind_edit_flat, height_tok, width_tok)
-        rec_edit_uint8 = batch_to_uint8_hwc(rec_edit)
+            for start in range(0, ind_all.shape[0], max_decode_batch):
+                chunk = ind_all[start : start + max_decode_batch]
+                rec_chunks.append(self.decode_from_indices_flat(chunk, height_tok, width_tok))
+        rec_all = torch.cat(rec_chunks, dim=0)
+        rec_all_uint8 = batch_to_uint8_hwc(rec_all)
+
+        rec_by_mode = {}
+        for mi, mode in enumerate(token_edit_modes):
+            rec_by_mode[mode] = rec_all_uint8[mi * batch_size : (mi + 1) * batch_size]
 
         ind_clean_cpu = ind_clean_flat.detach().cpu().numpy()
-        ind_edit_cpu = ind_edit_flat.detach().cpu().numpy()
 
         for i, original_path in enumerate(paths):
             images = [
                 {"filename": "0_original.png", "array": img_clean_uint8[i]},
                 {"filename": "1_recon_clean.png", "array": rec_clean_uint8[i]},
-                {"filename": "2_recon_token_edit.png", "array": rec_edit_uint8[i]},
             ]
+            for mode in token_edit_modes:
+                images.append({"filename": f"2_recon_token_edit_{mode}.png", "array": rec_by_mode[mode][i]})
+
             metadata = {
                 "experiment_mode": EXPERIMENT_MODE,
-                "token_edit_mode": TOKEN_EDIT_MODE,
+                "token_edit_modes": list(token_edit_modes),
                 "token_grid_hw": [int(height_tok), int(width_tok)],
                 "patch_bbox_px": list(map(int, bboxes_px[i])),
                 "patch_bbox_tok": list(map(int, bboxes_tok[i])),
                 "indices_clean": ind_clean_cpu[i].tolist(),
-                "indices_edit": ind_edit_cpu[i].tolist(),
+                "indices_edit_by_mode": {m: ind_edits_cpu[m][i].tolist() for m in token_edit_modes},
             }
+            if len(token_edit_modes) == 1:
+                metadata["token_edit_mode"] = token_edit_modes[0]
+                metadata["indices_edit"] = ind_edits_cpu[token_edit_modes[0]][i].tolist()
             task = {"original_path": original_path, "images": images, "metadata": metadata}
             self.queue.put(task)
 
