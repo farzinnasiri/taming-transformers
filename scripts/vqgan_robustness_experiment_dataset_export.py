@@ -107,7 +107,7 @@ if EXPERIMENT_MODE == "h2_patch_token_edit_decoder":
 else:
     OUTDIR = f"{STAMP}_robustness_dataset_vqgan_{EXPERIMENT_MODE}_patch{PATCH_TOK_SIDE}_seed{SEED}"
 SIZE = 256 # size to resize smallest side to, then center crop
-IMAGENET_VAL_ROOT = "/datasets/imagenet/val"
+IMAGENET_VAL_ROOT = get_env("IMAGENET_VAL_ROOT", "/datasets/imagenet/val")
 
 EXPORT_CODEBOOK_NPY = False
 CODEBOOK_NPY_SAVE_PATH = os.path.join(OUTDIR, "codebook.npy")
@@ -142,7 +142,7 @@ def list_imagenet_val_dirs(root):
     return sorted([d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))])
 
 def gather_val_paths_and_labels(root):
-    exts = ("*.JPEG","*.JPG","*.jpg")
+    exts = ("*.JPEG","*.JPG","*.jpeg","*.jpg")
     classes = list_imagenet_val_dirs(root)
     paths = []
     labels = []
