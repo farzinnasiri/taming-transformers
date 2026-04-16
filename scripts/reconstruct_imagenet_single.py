@@ -22,7 +22,7 @@ from taming.models.vqgan import VQModel
 from taming.modules.losses.lpips import LPIPS
 
 
-VALID_IMAGE_EXTENSIONS = {".jpeg", ".jpg", ".png", ".bmp", ".webp"}
+VALID_IMAGE_EXTENSIONS = {".jpeg", ".jpg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
 
 
 def parse_args():
